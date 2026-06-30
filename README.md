@@ -1,4 +1,4 @@
-# 🧠 CT2MAP-HN
+# CT2MAP-HN
 
 > **Hệ thống AI suy diễn bản đồ nguy cơ chuyển hóa từ ảnh CT đầu-cổ để phân loại bệnh nhân**
 
@@ -9,21 +9,21 @@
 
 ---
 
-## 📋 Mục lục
+## Mục lục
 
-- [Giới thiệu](#-giới-thiệu)
-- [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
-- [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
-- [Yêu cầu phần cứng](#-yêu-cầu-phần-cứng)
-- [Hướng dẫn cài đặt](#-hướng-dẫn-cài-đặt)
-- [Hướng dẫn tải dữ liệu HECKTOR](#-hướng-dẫn-tải-dữ-liệu-hecktor)
-- [Hướng dẫn chạy Pipeline](#-hướng-dẫn-chạy-pipeline)
-- [Stack kỹ thuật](#-stack-kỹ-thuật)
-- [Disclaimer](#%EF%B8%8F-disclaimer)
+- [Giới thiệu](#giới-thiệu)
+- [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
+- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
+- [Yêu cầu phần cứng](#yêu-cầu-phần-cứng)
+- [Hướng dẫn cài đặt](#hướng-dẫn-cài-đặt)
+- [Hướng dẫn tải dữ liệu HECKTOR](#hướng-dẫn-tải-dữ-liệu-hecktor)
+- [Hướng dẫn chạy Pipeline](#hướng-dẫn-chạy-pipeline)
+- [Stack kỹ thuật](#stack-kỹ-thuật)
+- [Disclaimer](#disclaimer)
 
 ---
 
-## 🎯 Giới thiệu
+## Giới thiệu
 
 **CT2MAP-HN** (CT-to-Metabolic-Activity-Prediction for Head & Neck) là hệ thống AI
 suy diễn **bản đồ nguy cơ chuyển hóa** (metabolic risk heatmap) từ ảnh CT đầu-cổ,
@@ -45,15 +45,16 @@ ra quyết định có nên chuyển bệnh nhân đi chụp PET/CT hay không.
 | **Đánh giá độ tin cậy** | MC Dropout tại thời điểm inference |
 | **Demo** | Streamlit dashboard tương tác |
 
-> ⚠️ **Lưu ý quan trọng:** Đây **KHÔNG** phải là hệ thống sinh ảnh PET giả (synthetic PET).
+> [!WARNING]
+> **Lưu ý quan trọng:** Đây **KHÔNG** phải là hệ thống sinh ảnh PET giả (synthetic PET).
 > Đầu ra là **bản đồ nguy cơ liên tục** (continuous risk map) phục vụ phân loại,
 > không phải ảnh PET để chẩn đoán.
 
 ---
 
-## 🏗️ Kiến trúc hệ thống
+## Kiến trúc hệ thống
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CT2MAP-HN Pipeline                       │
 ├─────────┬───────────┬──────────────┬────────────┬───────────────┤
@@ -73,81 +74,41 @@ ra quyết định có nên chuyển bệnh nhân đi chụp PET/CT hay không.
 
 ---
 
-## 📁 Cấu trúc thư mục
+## Cấu trúc thư mục
 
-```
+```text
 CT2MAP-HN/
 ├── configs/                    # Cấu hình YAML
-│   ├── data.yaml              # Cấu hình dữ liệu
-│   ├── preprocess.yaml        # Cấu hình tiền xử lý
-│   ├── baseline_nnunet.yaml   # Cấu hình model baseline
-│   ├── swin_unetr.yaml       # Cấu hình Swin UNETR
-│   ├── distill.yaml           # Cấu hình Knowledge Distillation
-│   ├── uncertainty.yaml       # Cấu hình MC Dropout
-│   └── demo.yaml             # Cấu hình Streamlit demo
+│   ├── data.yaml               # Cấu hình dữ liệu
+│   ├── preprocess.yaml         # Cấu hình tiền xử lý
+│   ├── baseline_nnunet.yaml    # Cấu hình model baseline
+│   ├── swin_unetr.yaml         # Cấu hình Swin UNETR
+│   ├── distill.yaml            # Cấu hình Knowledge Distillation
+│   ├── uncertainty.yaml        # Cấu hình MC Dropout
+│   └── demo.yaml               # Cấu hình Streamlit demo
 │
-├── ct2map/                    # Package chính
+├── ct2map/                     # Package chính
 │   ├── __init__.py
-│   ├── data/                  # Data loading & transforms
-│   │   ├── __init__.py
-│   │   ├── dataset.py         # PyTorch Dataset classes
-│   │   ├── transforms.py      # MONAI transforms pipeline
-│   │   └── manifest.py        # Data manifest generation
-│   │
-│   ├── models/                # Kiến trúc mô hình
-│   │   ├── __init__.py
-│   │   ├── baseline.py        # nnU-Net / BasicUNet
-│   │   ├── swin_unetr.py     # Swin UNETR wrapper
-│   │   └── distillation.py   # Teacher-Student framework
-│   │
-│   ├── training/              # Training logic
-│   │   ├── __init__.py
-│   │   ├── trainer.py         # Training loop
-│   │   ├── losses.py          # Loss functions
-│   │   └── schedulers.py     # LR schedulers
-│   │
-│   ├── inference/             # Inference pipeline
-│   │   ├── __init__.py
-│   │   ├── predictor.py       # Single-pass prediction
-│   │   └── uncertainty.py     # MC Dropout uncertainty
-│   │
-│   ├── evaluation/            # Metrics & evaluation
-│   │   ├── __init__.py
-│   │   └── metrics.py
-│   │
-│   └── utils/                 # Tiện ích
-│       ├── __init__.py
-│       ├── config.py          # YAML config loader
-│       ├── logging.py         # Logging setup
-│       ├── seed.py            # Reproducibility
-│       └── io.py              # File I/O helpers
+│   ├── data/                   # Data loading & transforms
+│   ├── models/                 # Kiến trúc mô hình
+│   ├── training/               # Training logic
+│   ├── inference/              # Inference pipeline
+│   ├── evaluation/             # Metrics & evaluation
+│   └── utils/                  # Tiện ích
 │
-├── scripts/                   # Entry-point scripts
-│   ├── preprocess.py          # Tiền xử lý dữ liệu
-│   ├── train_baseline.py      # Huấn luyện baseline
-│   ├── train_swin.py          # Huấn luyện Swin UNETR
-│   ├── distill.py             # Knowledge Distillation
-│   ├── predict.py             # Inference
-│   └── evaluate.py            # Đánh giá
+├── scripts/                    # Entry-point scripts
+│   ├── preprocess.py           # Tiền xử lý dữ liệu
+│   ├── train_baseline.py       # Huấn luyện baseline
+│   ├── train_swin.py           # Huấn luyện Swin UNETR
+│   ├── distill.py              # Knowledge Distillation
+│   ├── predict.py              # Inference
+│   └── evaluate.py             # Đánh giá
 │
-├── demo/                      # Streamlit demo app
-│   ├── app.py
-│   └── components/
-│
-├── tests/                     # Unit tests
-│   ├── test_data.py
-│   ├── test_models.py
-│   └── test_transforms.py
-│
-├── notebooks/                 # Jupyter notebooks (EDA, visualization)
-│
-├── data/                      # Dữ liệu (không track trong git)
-│   ├── raw/                   # Dữ liệu gốc HECKTOR
-│   ├── interim/               # Dữ liệu trung gian
-│   └── processed/             # Dữ liệu đã xử lý
-│
-├── outputs/                   # Kết quả training & inference
-│
+├── demo/                       # Streamlit demo app
+├── tests/                      # Unit tests
+├── notebooks/                  # Jupyter notebooks (EDA, visualization)
+├── data/                       # Dữ liệu (không track trong git)
+├── outputs/                    # Kết quả training & inference
 ├── .gitignore
 ├── Dockerfile
 ├── README.md
@@ -157,7 +118,7 @@ CT2MAP-HN/
 
 ---
 
-## 💻 Yêu cầu phần cứng
+## Yêu cầu phần cứng
 
 | Thành phần | Khuyến nghị |
 |---|---|
@@ -167,12 +128,13 @@ CT2MAP-HN/
 | **Storage** | ≥500GB SSD (dữ liệu HECKTOR + checkpoints) |
 | **OS** | Windows 11 + WSL2 / Ubuntu 22.04 |
 
-> 💡 **Ghi chú:** Có thể chạy trên GPU nhỏ hơn (24GB) bằng cách giảm batch size
-> và bật `use_checkpoint: true` trong config Swin UNETR.
+> [!NOTE]
+> Có thể chạy trên GPU có dung lượng VRAM nhỏ hơn (ví dụ: 24GB) bằng cách giảm batch size
+> và bật `use_checkpoint: true` trong cấu hình Swin UNETR.
 
 ---
 
-## 🔧 Hướng dẫn cài đặt
+## Hướng dẫn cài đặt
 
 ### 1. Clone repository
 
@@ -227,7 +189,7 @@ docker run --gpus all -p 8501:8501 -v $(pwd)/data:/app/data ct2map-hn
 
 ---
 
-## 📦 Hướng dẫn tải dữ liệu HECKTOR
+## Hướng dẫn tải dữ liệu HECKTOR
 
 ### Bộ dữ liệu HECKTOR (HEad and neCK TumOR)
 
@@ -238,8 +200,7 @@ Dự án sử dụng dữ liệu từ **HECKTOR Challenge 2021/2022**, bao gồm
 
 ### Cách tải
 
-1. **Đăng ký tài khoản** tại [AICROWD HECKTOR](https://www.aicrowd.com/challenges/miccai-2022-hecktor)
-   hoặc tải từ [Grand Challenge](https://hecktor.grand-challenge.org/)
+1. **Đăng ký tài khoản** tại [AICROWD HECKTOR](https://www.aicrowd.com/challenges/miccai-2022-hecktor) hoặc tải từ [Grand Challenge](https://hecktor.grand-challenge.org/).
 
 2. **Tải dữ liệu:**
    ```bash
@@ -266,7 +227,7 @@ Dự án sử dụng dữ liệu từ **HECKTOR Challenge 2021/2022**, bao gồm
 
 ---
 
-## 🚀 Hướng dẫn chạy Pipeline
+## Hướng dẫn chạy Pipeline
 
 ### Bước 1: Tiền xử lý dữ liệu
 
@@ -326,7 +287,7 @@ streamlit run demo/app.py -- --config configs/demo.yaml
 
 ---
 
-## 🛠️ Stack kỹ thuật
+## Stack kỹ thuật
 
 | Thành phần | Công nghệ |
 |---|---|
@@ -342,9 +303,10 @@ streamlit run demo/app.py -- --config configs/demo.yaml
 
 ---
 
-## ⚖️ Disclaimer
+## Disclaimer
 
-> **⚠️ CHỈ DÀNH CHO MỤC ĐÍCH NGHIÊN CỨU (Research-Use Only)**
+> [!CAUTION]
+> **CHỈ DÀNH CHO MỤC ĐÍCH NGHIÊN CỨU (Research-Use Only)**
 >
 > Hệ thống CT2MAP-HN được phát triển **hoàn toàn cho mục đích nghiên cứu học thuật**.
 > Sản phẩm này:
@@ -360,6 +322,6 @@ streamlit run demo/app.py -- --config configs/demo.yaml
 
 ---
 
-## 📄 License
+## License
 
 MIT License - Xem file [LICENSE](LICENSE) để biết thêm chi tiết.
