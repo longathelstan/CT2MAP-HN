@@ -1,0 +1,52 @@
+# ============================================================================
+# CT2MAP-HN: Preprocessing Configuration
+# Cấu hình tiền xử lý ảnh CT/PET/Mask cho head-neck cancer
+# ============================================================================
+
+preprocess:
+  # --- I/O Directories ---
+  input_dir: data/raw/hecktor
+  output_dir: data/processed
+
+  # --- Resampling ---
+  # Target isotropic spacing in mm [x, y, z]
+  # 1mm isotropic is standard for head-neck CT analysis
+  target_spacing: [1.0, 1.0, 1.0]
+
+  # --- Intensity Processing ---
+  # HU window clipping [min, max]
+  # [-200, 300] covers soft tissue and bone relevant for head-neck
+  hu_clip: [-200, 300]
+
+  # Normalization method after clipping:
+  #   minmax : Scale to [0, 1] range
+  #   zscore : Zero-mean, unit-variance normalization
+  normalize_method: minmax
+
+  # --- Cropping ---
+  # Crop method:
+  #   bbox    : Tight bounding box around head-neck anatomy (recommended)
+  #   fixed   : Fixed crop_size centered on image center
+  #   anatomy : Anatomy-aware cropping using landmark detection
+  crop_method: bbox
+
+  # Margin around bounding box in voxels [x, y, z]
+  # Only used when crop_method=bbox
+  crop_margin: [10, 10, 10]
+
+  # Fixed crop size in voxels [D, H, W]
+  # Used as fallback when crop_method=fixed, or as max size for bbox method
+  crop_size: [192, 192, 192]
+
+  # --- Orientation ---
+  # Reorient all images to standard orientation
+  # RAS = Right-Anterior-Superior (radiological standard)
+  orientation: RAS
+
+  # --- Processing ---
+  # Number of parallel workers for preprocessing
+  # Recommended: num_physical_cores / 2 (EPYC 7743P has 64 cores)
+  num_workers: 8
+
+  # Whether to overwrite existing processed files
+  overwrite: false

@@ -1,0 +1,156 @@
+# ============================================================================
+# CT2MAP-HN: Swin UNETR Configuration (Student)
+# Swin Transformer-based U-Net for 3D metabolic risk map regression
+# Optimized for 4× RTX A6000 (48GB VRAM each)
+# ============================================================================
+
+# --- Model Architecture ---
+model:
+  # Model type identifier
+  type: swin_unetr
+
+  # Input image size [D, H, W] — must be divisible by patch_size and window_size
+  img_size: [128, 128, 128]
+
+  # Input: single-channel CT
+  in_channels: 1
+
+  # Output: single-channel risk heatmap
+  out_channels: 1
+
+  # Base feature dimension (C in the paper)
+  # Higher = more capacity but more VRAM
+  feature_size: 48
+
+  # Patch size for patch embedding [D, H, W]
+  # Smaller patch = finer spatial resolution but more computation
+  patch_size: [2, 2, 2]
+
+  # Window size for Swin Transformer attention
+  window_size: [7, 7, 7]
+
+  # Number of Swin Transformer blocks at each stage
+  # 4 stages: [stage1, stage2, stage3, stage4]
+  depths: [2, 2, 6, 2]
+
+  # Number of attention heads at each stage
+  # Must divide feature_size × 2^stage evenly
+  num_heads: [3, 6, 12, 24]
+
+  # MLP ratio in transformer blocks
+  mlp_ratio: 4.0
+
+  # Dropout rates
+  dropout_rate: 0.0          # Embedding dropout
+  attn_drop_rate: 0.0        # Attention dropout
+  drop_path_rate: 0.1        # Stochastic depth drop path rate
+
+  # QKV bias in attention
+  qkv_bias: true
+
+  # Activation function for final output
+  final_activation: sigmoid
+
+  # Normalization layer: batch | instance | layer
+  norm_layer: instance
+
+  # Use gradient checkpointing for memory efficiency
+  # Trades compute for memory — ESSENTIAL for large 3D volumes
+  use_checkpoint: true
+
+  # Use pre-trained weights from MONAI model zoo
+  # Options: null | "monai_swin_unetr_btcv"
+  pretrained: null
+
+# --- Training ---
+training:
+  # Total training epochs
+  epochs: 500
+
+  # Batch size per GPU
+  # Swin UNETR is memory-heavy; batch_size=2 per A6000 (48GB) with checkpointing
+  batch_size: 2
+
+  # Learning rate (lower than baseline due to transformer sensitivity)
+  lr: 3.0e-4
+
+  # Optimizer: adamw recommended for transformers
+  optimizer: adamw
+
+  # Weight decay (higher for transformers to prevent overfitting)
+  weight_decay: 1.0e-4
+
+  # Gradient clipping
+  grad_clip_norm: 1.0
+
+  # Learning rate scheduler
+  scheduler:
+    type: warmup_cosine
+
+    # Longer warmup for transformer stability
+    warmup_epochs: 20
+
+    # Minimum LR
+    min_lr: 1.0e-7
+
+  # Loss function
+  loss:
+    primary: mse
+    weights:
+      primary: 1.0
+      ssim: 0.1
+      gradient: 0.05
+
+  # Early stopping
+  early_stopping:
+    patience: 50
+    metric: val_loss
+    mode: min
+
+  # Mixed precision training
+  use_amp: true
+
+  # Multi-GPU training
+  distributed: true
+  num_gpus: 4
+
+  # Gradient accumulation to compensate for smaller batch size
+  # Effective batch = 2 × 4 GPUs × 2 accum = 16
+  accumulation_steps: 2
+
+# --- Data Loading ---
+data:
+  config: configs/data.yaml
+  num_workers: 8
+  pin_memory: true
+
+  augmentation:
+    random_flip_prob: 0.5
+    random_rotate90_prob: 0.3
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+    elastic_deform_prob: 0.15
+    elastic_deform_sigma: [5, 7]
+    elastic_deform_magnitude: [50, 70]
+
+    # Training patch size — must match model.img_size
+    patch_size: [128, 128, 128]
+
+  # Sliding window inference for validation
+  val_patch_size: [128, 128, 128]
+  val_overlap: 0.5
+
+# --- Output ---
+output:
+  dir: outputs/swin_unetr
+  checkpoint:
+    save_best: true
+    save_last: true
+    save_every_n_epochs: 50
+    metric: val_loss
+    mode: min
+  tb_log_dir: outputs/swin_unetr/tb_logs
+
+# --- Reproducibility ---
+seed: 42
+deterministic: true

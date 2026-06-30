@@ -1,0 +1,90 @@
+# ============================================================================
+# CT2MAP-HN: Uncertainty Estimation Configuration
+# Monte Carlo Dropout for epistemic uncertainty quantification
+# ============================================================================
+
+# --- MC Dropout Settings ---
+mc_dropout:
+  # Enable MC Dropout at inference time
+  enabled: true
+
+  # Number of stochastic forward passes
+  # More passes = better uncertainty estimate but slower inference
+  # Recommended: 20-50 for clinical use, 10 for quick evaluation
+  num_passes: 30
+
+  # Dropout rate applied during MC inference
+  # Should match the dropout rate used during training
+  # If model was trained with dropout=0.1, use 0.1 here
+  dropout_rate: 0.1
+
+  # Which layers to apply MC Dropout to:
+  #   all       : All dropout layers in the model
+  #   decoder   : Only decoder dropout layers
+  #   bottleneck: Only bottleneck dropout layer
+  apply_to: all
+
+# --- Uncertainty Metrics ---
+uncertainty_metrics:
+  # Compute voxel-wise predictive mean
+  compute_mean: true
+
+  # Compute voxel-wise predictive variance (epistemic uncertainty)
+  compute_variance: true
+
+  # Compute voxel-wise predictive entropy
+  compute_entropy: true
+
+  # Compute mutual information (model uncertainty)
+  compute_mutual_info: false
+
+  # Coefficient of variation (std / mean) — interpretable uncertainty
+  compute_cv: true
+
+# --- Thresholds ---
+thresholds:
+  # Risk map threshold to classify voxels as "high risk"
+  # Voxels with mean prediction > high_risk are flagged
+  high_risk: 0.5
+
+  # Confidence threshold based on coefficient of variation
+  # Voxels with CV > low_confidence are considered unreliable
+  low_confidence: 0.3
+
+  # Volume threshold: minimum number of high-risk voxels
+  # to flag a patient for PET/CT referral (in cm³)
+  min_risk_volume_cm3: 1.0
+
+# --- Abstain Policy ---
+# What to do when uncertainty is too high for reliable prediction
+abstain_policy:
+  # Enable abstain mechanism
+  enabled: true
+
+  # Abstain strategy:
+  #   flag     : Flag uncertain regions but still output prediction
+  #   mask     : Mask out uncertain regions (set to 0)
+  #   escalate : Flag entire case for human review
+  strategy: flag
+
+  # Threshold for abstaining (based on mean uncertainty over the volume)
+  # If mean CV of high-risk voxels > this threshold, trigger abstain
+  global_uncertainty_threshold: 0.5
+
+  # Maximum fraction of high-risk voxels that can be uncertain
+  # before escalating the entire case
+  max_uncertain_fraction: 0.4
+
+# --- Output ---
+output:
+  # Save individual MC pass predictions (large files!)
+  save_all_passes: false
+
+  # Save uncertainty maps as NIfTI
+  save_uncertainty_maps: true
+
+  # Save summary statistics per patient as CSV
+  save_patient_summary: true
+
+  # Output directory
+  dir: outputs/uncertainty

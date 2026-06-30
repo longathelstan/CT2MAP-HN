@@ -1,0 +1,48 @@
+# ============================================================================
+# CT2MAP-HN Requirements
+# Metabolic risk heatmap inference from head-neck CT
+# ============================================================================
+
+# --- Deep Learning Framework ---
+torch>=2.1.0
+monai>=1.3.0
+nnunetv2>=2.2
+
+# --- Medical Imaging I/O ---
+simpleitk>=2.3.0
+nibabel>=5.0
+
+# --- Scientific Computing ---
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+scikit-learn>=1.3
+
+# --- Visualization ---
+matplotlib>=3.7
+seaborn>=0.12
+plotly>=5.15
+
+# --- Experiment Tracking ---
+tensorboard>=2.14
+
+# --- Configuration & Utilities ---
+pyyaml>=6.0
+rich>=13.0
+tqdm>=4.65
+
+# --- Demo / Dashboard ---
+streamlit>=1.28
+
+# --- Image Processing ---
+opencv-python>=4.8
+
+# --- Transformer Utilities ---
+einops>=0.7
+timm>=0.9
+
+# --- Templating ---
+jinja2>=3.1
+
+# --- Testing ---
+pytest>=7.4

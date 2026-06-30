@@ -1,0 +1,38 @@
+# ============================================================================
+# CT2MAP-HN: Data Configuration
+# Cấu hình dữ liệu HECKTOR và chiến lược tạo target
+# ============================================================================
+
+data:
+  # --- Paths ---
+  # Root directory containing raw HECKTOR data
+  root: data/raw/hecktor
+
+  # Directory for processed (resampled, cropped, normalized) data
+  processed_dir: data/processed
+
+  # Path to the data manifest CSV (patient_id, ct_path, pet_path, mask_path)
+  manifest_path: data/processed/manifests/manifest.csv
+
+  # Path to train/val/test split JSON
+  split_file: data/processed/manifests/splits.json
+
+  # --- Target Generation ---
+  # Target type for training:
+  #   binary      : Binary lesion mask (0/1)
+  #   gaussian    : Gaussian-smoothed lesion mask (continuous, 0.0-1.0)
+  #   pet_derived : Soft target derived from PET SUV (used in distillation)
+  target_type: gaussian
+
+  # Sigma for Gaussian smoothing (only used when target_type=gaussian)
+  # Higher sigma → smoother / wider risk zone around lesion
+  gaussian_sigma: 3.0
+
+  # --- Data Splits ---
+  # Ratios must sum to 1.0
+  train_ratio: 0.70
+  val_ratio: 0.10
+  test_ratio: 0.20
+
+  # --- Reproducibility ---
+  seed: 42

@@ -1,0 +1,78 @@
+# ============================================================================
+# CT2MAP-HN: Demo Dashboard Configuration
+# Streamlit interactive visualization for metabolic risk heatmaps
+# ============================================================================
+
+# --- Model ---
+model:
+  # Path to the trained model checkpoint for inference
+  checkpoint: outputs/distillation/checkpoints/best_model.pt
+
+  # Model config (for architecture reconstruction)
+  config: configs/swin_unetr.yaml
+
+  # Device: cuda | cpu | auto (auto selects GPU if available)
+  device: auto
+
+# --- MC Dropout for Demo ---
+# Fewer passes than full evaluation for interactive speed
+mc_passes: 10
+
+# --- Demo Data ---
+demo:
+  # Directory containing demo/example cases (preprocessed CT volumes)
+  cases_dir: data/demo_cases
+
+  # Maximum number of cases to show in the selector
+  max_cases: 20
+
+  # Precomputed predictions directory (optional, for faster loading)
+  precomputed_dir: outputs/demo_cache
+
+# --- Visualization ---
+visualization:
+  # Default colormap for risk heatmap overlay
+  risk_colormap: hot
+
+  # Default colormap for uncertainty overlay
+  uncertainty_colormap: viridis
+
+  # Default opacity for overlay
+  overlay_alpha: 0.4
+
+  # Default HU window for CT display [center, width]
+  ct_window:
+    center: 50
+    width: 400
+
+  # Show uncertainty panel by default
+  show_uncertainty: true
+
+  # Show risk histogram by default
+  show_histogram: true
+
+  # Show 3D rendering option
+  enable_3d_render: false
+
+# --- Streamlit Settings ---
+streamlit:
+  # Page title
+  page_title: "CT2MAP-HN: Metabolic Risk Heatmap"
+
+  # Page icon (emoji or path to .ico)
+  page_icon: "🧠"
+
+  # Layout: wide | centered
+  layout: wide
+
+  # Sidebar state: expanded | collapsed | auto
+  initial_sidebar_state: expanded
+
+  # Theme (dark mode recommended for medical imaging)
+  theme: dark
+
+  # Server configuration
+  server:
+    port: 8501
+    address: 0.0.0.0
+    max_upload_size_mb: 500

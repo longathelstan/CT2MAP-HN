@@ -1,0 +1,144 @@
+# ============================================================================
+# CT2MAP-HN: Baseline Model Configuration (Teacher)
+# nnU-Net v2 / MONAI BasicUNet for 3D voxel-level regression
+# Optimized for 4× RTX A6000 (48GB VRAM each)
+# ============================================================================
+
+# --- Model Architecture ---
+model:
+  # Model type: basicunet | nnunet
+  type: basicunet
+
+  # Input: single-channel CT
+  in_channels: 1
+
+  # Output: single-channel risk heatmap (continuous, 0.0-1.0)
+  out_channels: 1
+
+  # Feature map sizes at each encoder level
+  # BasicUNet default: [32, 32, 64, 128, 256, 32]
+  features: [32, 64, 128, 256, 512, 32]
+
+  # Activation function for final layer
+  # sigmoid: output ∈ [0, 1] for risk map
+  final_activation: sigmoid
+
+  # Dropout rate in the network
+  dropout: 0.1
+
+  # Normalization type: batch | instance | group
+  norm: instance
+
+# --- Training ---
+training:
+  # Total training epochs
+  epochs: 300
+
+  # Batch size per GPU
+  # 4 × A6000 (48GB) → batch_size=4 per GPU → effective batch = 16
+  batch_size: 4
+
+  # Learning rate
+  lr: 1.0e-3
+
+  # Optimizer: adam | adamw | sgd
+  optimizer: adamw
+
+  # Weight decay for regularization
+  weight_decay: 1.0e-5
+
+  # Gradient clipping (max norm), null to disable
+  grad_clip_norm: 1.0
+
+  # Learning rate scheduler
+  scheduler:
+    # Type: cosine_annealing | reduce_on_plateau | polynomial | warmup_cosine
+    type: warmup_cosine
+
+    # Warmup epochs (linear warmup from 0 to lr)
+    warmup_epochs: 10
+
+    # Minimum LR at end of cosine decay
+    min_lr: 1.0e-6
+
+  # Loss function configuration
+  loss:
+    # Primary loss: mse | l1 | smooth_l1 | focal_mse
+    primary: mse
+
+    # Auxiliary losses and their weights
+    # Total loss = lambda_primary * L_primary + lambda_ssim * L_ssim + lambda_grad * L_grad
+    weights:
+      primary: 1.0
+      ssim: 0.1         # Structural similarity loss
+      gradient: 0.05    # Gradient difference loss (edge preservation)
+
+  # Early stopping
+  early_stopping:
+    patience: 30
+    metric: val_loss
+    mode: min
+
+  # Mixed precision training (AMP)
+  use_amp: true
+
+  # Distributed Data Parallel across 4 GPUs
+  distributed: true
+  num_gpus: 4
+
+  # Gradient accumulation steps (effective_batch = batch_size × num_gpus × accum_steps)
+  accumulation_steps: 1
+
+# --- Data Loading ---
+data:
+  # Reference to data config
+  config: configs/data.yaml
+
+  # Number of data loading workers per GPU
+  num_workers: 8
+
+  # Pin memory for faster GPU transfer
+  pin_memory: true
+
+  # Training augmentations
+  augmentation:
+    # Random spatial transforms
+    random_flip_prob: 0.5
+    random_rotate90_prob: 0.3
+
+    # Random intensity transforms
+    random_intensity_shift: 0.1
+    random_intensity_scale: 0.1
+
+    # Random elastic deformation
+    elastic_deform_prob: 0.2
+    elastic_deform_sigma: [5, 7]
+    elastic_deform_magnitude: [50, 70]
+
+    # Random crop (training patch size)
+    # Smaller than full volume for memory efficiency
+    patch_size: [128, 128, 128]
+
+  # Validation: use sliding window inference
+  val_patch_size: [128, 128, 128]
+  val_overlap: 0.5
+
+# --- Output ---
+output:
+  # Base directory for this experiment
+  dir: outputs/baseline
+
+  # Checkpoint saving
+  checkpoint:
+    save_best: true
+    save_last: true
+    save_every_n_epochs: 50
+    metric: val_loss
+    mode: min
+
+  # TensorBoard logs
+  tb_log_dir: outputs/baseline/tb_logs
+
+# --- Reproducibility ---
+seed: 42
+deterministic: true

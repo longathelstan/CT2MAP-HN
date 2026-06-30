@@ -1,0 +1,90 @@
+# ============================================================================
+# CT2MAP-HN: Knowledge Distillation Configuration
+# Teacher-Student framework: Baseline (teacher) → Swin UNETR (student)
+# ============================================================================
+
+# --- Teacher Model ---
+teacher:
+  # Path to trained teacher checkpoint
+  checkpoint: outputs/baseline/checkpoints/best_model.pt
+
+  # Teacher config (for architecture reconstruction)
+  config: configs/baseline_nnunet.yaml
+
+  # Freeze teacher weights during distillation (must be true)
+  freeze: true
+
+  # Feature layers to extract for intermediate distillation
+  # These are layer names in the teacher model for feature-level KD
+  # Leave empty [] for output-only distillation
+  feature_layers:
+    - encoder.layer1   # Low-level features
+    - encoder.layer3   # Mid-level features
+    - bottleneck       # Deepest features
+
+# --- Student Model ---
+student:
+  # Student model configuration file
+  config: configs/swin_unetr.yaml
+
+  # Whether to initialize student from pre-trained weights
+  pretrained: null
+
+# --- Distillation Settings ---
+distillation:
+  # --- Loss Weights ---
+  # Total loss = lambda1 * L_task + lambda2 * L_kd
+  # L_task : task loss (MSE between student output and ground truth)
+  # L_kd   : distillation loss (MSE between student and teacher outputs)
+  loss_weights:
+    # Weight for task loss (ground truth supervision)
+    lambda1: 0.5
+
+    # Weight for distillation loss (teacher supervision)
+    lambda2: 0.5
+
+  # --- Feature Distillation ---
+  # Whether to use intermediate feature matching in addition to output KD
+  use_feature_distillation: true
+
+  # Weight for feature-level distillation loss
+  # Total = lambda1*L_task + lambda2*L_output_kd + lambda_feat*L_feature_kd
+  lambda_feature: 0.1
+
+  # Feature distillation loss type: mse | cosine | attention_transfer
+  feature_loss_type: mse
+
+  # --- Warmup ---
+  # Number of epochs to warm up distillation
+  # During warmup, lambda2 linearly increases from 0 to its target value
+  # This lets the student first learn basic features before following teacher
+  warmup_epochs: 15
+
+  # --- Temperature ---
+  # Temperature for softening outputs (higher = softer distributions)
+  # For regression tasks, this scales the output before computing KD loss
+  # Set to 1.0 for no scaling
+  temperature: 1.0
+
+  # --- Progressive Distillation ---
+  # Schedule for adjusting lambda1/lambda2 during training
+  # Options: constant | linear_decay | cosine_decay
+  # linear_decay: gradually reduce lambda2 so student relies less on teacher
+  schedule: constant
+
+  # If schedule != constant, epoch at which to start decay
+  decay_start_epoch: 200
+
+# --- Output ---
+output:
+  dir: outputs/distillation
+  checkpoint:
+    save_best: true
+    save_last: true
+    save_every_n_epochs: 50
+    metric: val_loss
+    mode: min
+  tb_log_dir: outputs/distillation/tb_logs
+
+# --- Reproducibility ---
+seed: 42
