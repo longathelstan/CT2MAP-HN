@@ -185,18 +185,22 @@ class LesionLoss(nn.Module):
             Scalar combined loss value.
         """
         # --- BCE / Focal component ---
-        if self.use_focal:
-            bce = F.binary_cross_entropy(pred, target, reduction="none")
-            focal_w = _focal_weight(pred, target, self.focal_gamma)
-            alpha_w = self.focal_alpha * target + (1.0 - self.focal_alpha) * (1.0 - target)
-            bce_loss = (alpha_w * focal_w * bce).mean()
-        else:
-            bce_loss = F.binary_cross_entropy(pred, target, reduction="mean")
+        # Run BCE in float32 for autocast compatibility and numerical stability
+        with torch.amp.autocast("cuda", enabled=False):
+            pred_f32 = pred.float()
+            target_f32 = target.float()
+            if self.use_focal:
+                bce = F.binary_cross_entropy(pred_f32, target_f32, reduction="none")
+                focal_w = _focal_weight(pred_f32, target_f32, self.focal_gamma)
+                alpha_w = self.focal_alpha * target_f32 + (1.0 - self.focal_alpha) * (1.0 - target_f32)
+                bce_loss = (alpha_w * focal_w * bce).mean()
+            else:
+                bce_loss = F.binary_cross_entropy(pred_f32, target_f32, reduction="mean")
 
         # --- Dice component ---
         dice_loss = 1.0 - _dice_score(pred, target)
 
-        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        return self.bce_weight * bce_loss.to(pred.dtype) + self.dice_weight * dice_loss
 
 
 # ====================================================================
@@ -236,7 +240,8 @@ class TriageLoss(nn.Module):
             return F.binary_cross_entropy_with_logits(
                 logits, target, pos_weight=pw
             )
-        return F.binary_cross_entropy(pred, target)
+        with torch.amp.autocast("cuda", enabled=False):
+            return F.binary_cross_entropy(pred.float(), target.float()).to(pred.dtype)
 
 
 # ====================================================================
