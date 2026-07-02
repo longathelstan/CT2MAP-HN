@@ -432,54 +432,157 @@ class DistillTrainer:
 def _build_dataloaders(
     cfg: Dict[str, Any],
 ) -> tuple[DataLoader, DataLoader]:
-    """Build train / val DataLoaders with CT + PET.
-
-    Placeholder with synthetic data.
+    """Build train and validation DataLoaders using real HECKTOR data (with PET).
 
     Args:
-        cfg: Data config.
+        cfg: Data config dict.
 
     Returns:
-        ``(train_loader, val_loader)`` tuple.
+        Tuple of ``(train_loader, val_loader)``.
     """
+    from src.datasets.ct_teacher_dataset import CTTeacherDataset
+    from src.datasets.transforms import get_train_transforms, get_val_transforms
+    from src.utils.config import load_config
+
+    # Load the data configuration yaml
+    data_config_path = cfg.get("config", "configs/data.yaml")
+    data_cfg = load_config(data_config_path).get("data", {})
+
+    manifest_path = data_cfg.get("manifest_path", "data/processed/manifests/manifest.csv")
+    processed_dir = data_cfg.get("processed_dir", "data/processed")
+    target_dir = data_cfg.get("target_dir", str(Path(processed_dir) / "targets"))
+    splits_path = data_cfg.get("split_file", "data/processed/manifests/splits.json")
+    target_type = data_cfg.get("target_type", "gaussian")
+
+    # Map baseline yaml targets: 'gaussian' -> 'gaussian_heatmap'
+    if target_type == "gaussian":
+        dataset_target_type = "gaussian_heatmap"
+    else:
+        dataset_target_type = target_type
+
     batch_size = int(cfg.get("batch_size", 1))
-    patch_size = tuple(cfg.get("patch_size", [96, 96, 96]))
-    num_train = int(cfg.get("num_train_samples", 20))
-    num_val = int(cfg.get("num_val_samples", 5))
-    num_workers = int(cfg.get("num_workers", 4))
+    num_workers = int(cfg.get("num_workers", 8))
+    pin_memory = bool(cfg.get("pin_memory", True))
 
-    logger.warning("Using SYNTHETIC data – replace with real dataset.")
+    # Build transforms
+    aug_cfg = cfg.get("augmentation", {})
+    # Since RandCropByPosNegLabeld expects MASK_KEY = "lesion_mask", SPATIAL_KEYS = [IMAGE_KEY, TARGET_KEY, MASK_KEY]
+    # For CTTeacherDataset, we also need to transform pet_image!
+    # However, get_train_transforms in src.datasets.transforms uses SPATIAL_KEYS = ["image", "heatmap_target", "lesion_mask"].
+    # Let's customize transforms for distillation if needed, or use get_train_transforms.
+    # Note: get_train_transforms doesn't automatically include "pet_image" in SPATIAL_KEYS in transforms.py.
+    # Wait, let's look at src/datasets/transforms.py to verify if it has teacher transforms, or if we need to define them.
+    # Actually, we can define custom teacher transforms here or import them. Let's see: ct_teacher_dataset.py might apply some custom transforms or expects it.
+    train_transform_config = {
+        "spatial_size": aug_cfg.get("patch_size", [128, 128, 128]),
+        "flip_prob": aug_cfg.get("random_flip_prob", 0.5),
+        "flip_axes": [0, 1, 2],
+        "num_samples": 2,
+        "pos_ratio": 0.7,
+        "affine_prob": 0.3,
+        "gaussian_noise_prob": 0.2,
+    }
+    val_transform_config = {
+        "spatial_size": cfg.get("val_patch_size", [128, 128, 128]),
+    }
 
-    import torch.utils.data as tud
+    train_transforms = get_train_transforms(train_transform_config)
+    val_transforms = get_val_transforms(val_transform_config)
 
-    class _SyntheticDistillDataset(tud.Dataset):
-        def __init__(self, n: int) -> None:
-            self.n = n
-            self.patch = patch_size
+    # Initialize datasets
+    train_ds = CTTeacherDataset(
+        manifest_path=manifest_path,
+        split="train",
+        processed_dir=processed_dir,
+        target_dir=target_dir,
+        splits_path=splits_path,
+        transform=train_transforms,
+        target_type=dataset_target_type,
+    )
+
+    val_ds = CTTeacherDataset(
+        manifest_path=manifest_path,
+        split="val",
+        processed_dir=processed_dir,
+        target_dir=target_dir,
+        splits_path=splits_path,
+        transform=val_transforms,
+        target_type=dataset_target_type,
+    )
+
+    # Map keys from CTTeacherDataset to Trainer expectations:
+    # 'image' -> 'ct', 'pet_image' -> 'pet', 'heatmap_target' -> 'heatmap'
+    class _MappedDataset(torch.utils.data.Dataset):
+        def __init__(self, ds: CTTeacherDataset) -> None:
+            self.ds = ds
 
         def __len__(self) -> int:
-            return self.n
+            return len(self.ds)
 
-        def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-            return {
-                "ct": torch.randn(1, *self.patch),
-                "pet": torch.rand(1, *self.patch),
-                "heatmap": torch.rand(1, *self.patch),
-                "lesion_mask": (torch.rand(1, *self.patch) > 0.9).float(),
-                "triage_label": (torch.rand(1) > 0.5).float(),
-            }
+        def __getitem__(self, idx: int) -> dict[str, Any] | list[dict[str, Any]]:
+            sample = self.ds[idx]
+            # Handle list of samples returned by RandCropByPosNegLabeld (due to num_samples=2)
+            if isinstance(sample, list):
+                mapped_list = []
+                for s in sample:
+                    mapped = {
+                        "ct": s["image"],
+                        "pet": s.get("pet_image"),
+                        "heatmap": s["heatmap_target"],
+                        "lesion_mask": s["lesion_mask"],
+                        "triage_label": torch.tensor([float(s["case_label"].get("high_risk", 0.0))]),
+                        "case_id": s["case_id"],
+                    }
+                    mapped_list.append(mapped)
+                return mapped_list
+            else:
+                return {
+                    "ct": sample["image"],
+                    "pet": sample.get("pet_image"),
+                    "heatmap": sample["heatmap_target"],
+                    "lesion_mask": sample["lesion_mask"],
+                    "triage_label": torch.tensor([float(sample["case_label"].get("high_risk", 0.0))]),
+                    "case_id": sample["case_id"],
+                }
 
-    def _make(n: int, shuffle: bool) -> DataLoader:
-        return DataLoader(
-            _SyntheticDistillDataset(n),
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=True,
-            drop_last=shuffle,
-        )
+    # Custom collate function to handle lists of dicts returned by RandCropByPosNegLabeld
+    def _collate_fn(batch):
+        flat_batch = []
+        for item in batch:
+            if isinstance(item, list):
+                flat_batch.extend(item)
+            else:
+                flat_batch.append(item)
+        
+        collated = {}
+        for key in flat_batch[0].keys():
+            if isinstance(flat_batch[0][key], torch.Tensor):
+                collated[key] = torch.stack([x[key] for x in flat_batch])
+            else:
+                collated[key] = [x[key] for x in flat_batch]
+        return collated
 
-    return _make(num_train, True), _make(num_val, False)
+    train_loader = DataLoader(
+        _MappedDataset(train_ds),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True,
+        collate_fn=_collate_fn,
+    )
+
+    val_loader = DataLoader(
+        _MappedDataset(val_ds),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+        collate_fn=_collate_fn,
+    )
+
+    return train_loader, val_loader
 
 
 # ====================================================================

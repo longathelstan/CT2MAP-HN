@@ -82,9 +82,8 @@ training:
   # Mixed precision training (AMP)
   use_amp: true
 
-  # Distributed Data Parallel across 4 GPUs
-  distributed: true
-  num_gpus: 4
+  # Single-GPU configuration
+  use_data_parallel: false
 
   # Gradient accumulation steps (effective_batch = batch_size × num_gpus × accum_steps)
   accumulation_steps: 1

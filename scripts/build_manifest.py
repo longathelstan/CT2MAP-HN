@@ -45,8 +45,8 @@ logger = setup_logger("build_manifest", level="INFO")
 #               {CASE_ID}.nii.gz (mask in labelsTr/)
 # We support both conventions automatically.
 
-_CT_SUFFIXES = ("_ct.nii.gz", "_CT.nii.gz", "__CT.nii.gz")
-_PET_SUFFIXES = ("_pt.nii.gz", "_PT.nii.gz", "__PT.nii.gz")
+_CT_SUFFIXES = ("__CT.nii.gz", "_CT.nii.gz", "_ct.nii.gz")
+_PET_SUFFIXES = ("__PT.nii.gz", "_PT.nii.gz", "_pt.nii.gz")
 _MASK_SUFFIXES = ("_gt.nii.gz", "_GTVp.nii.gz", ".nii.gz")
 
 
@@ -80,6 +80,10 @@ def _find_file(
             candidate = directory / f"{case_id}{suffix}"
             if candidate.exists():
                 return candidate
+            # Support nested directory structure: directory/case_id/case_id+suffix
+            nested_candidate = directory / case_id / f"{case_id}{suffix}"
+            if nested_candidate.exists():
+                return nested_candidate
     return None
 
 

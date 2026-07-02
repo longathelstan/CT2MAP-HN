@@ -85,5 +85,15 @@ def build_model(config: dict) -> "BaselineUNet | SwinUNETRStudent | TeacherEncod
         )
 
     # Pop 'name' so remaining keys are constructor kwargs.
+    import inspect
+    cls = _MODEL_REGISTRY[model_name]
     kwargs = {k: v for k, v in model_cfg.items() if k != "name"}
-    return _MODEL_REGISTRY[model_name](**kwargs)
+    
+    # Inspect constructor signature
+    sig = inspect.signature(cls)
+    has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if not has_var_keyword:
+        # Keep only keys that exist in the constructor signature
+        kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        
+    return cls(**kwargs)
