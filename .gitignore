@@ -147,3 +147,4 @@ coverage.xml
 .env.*
 secrets.yaml
 credentials.yaml
+C

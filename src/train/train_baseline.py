@@ -275,7 +275,7 @@ def _build_dataloaders(
 
     val_loader = DataLoader(
         _MappedDataset(val_ds),
-        batch_size=batch_size,
+        batch_size=1,  # Set to 1 to support variable spatial sizes in validation
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
