@@ -137,6 +137,8 @@ class CaseInferencer:
         """
         model_cfg = self.config.get("model", {})
         model_type = model_cfg.get("type", "basic_unet").lower()
+        if model_type == "basicunet":
+            model_type = "basic_unet"
 
         in_channels = model_cfg.get("in_channels", 1)
         out_channels = model_cfg.get("out_channels", 1)
@@ -373,9 +375,23 @@ class CaseInferencer:
         # Preprocess
         input_tensor, metadata = self._preprocess(ct_path)
 
-        # Forward pass
+        # Forward pass using sliding window inference to avoid CUDA OOM
+        from monai.inferers import sliding_window_inference
+        
+        preproc_cfg = self.config.get("preprocessing", {})
+        roi_size = preproc_cfg.get("val_patch_size", [128, 128, 128])
+        if isinstance(roi_size, list):
+            roi_size = tuple(roi_size)
+
         self.model.eval()
-        output = self.model(input_tensor)
+        output = sliding_window_inference(
+            inputs=input_tensor,
+            roi_size=roi_size,
+            sw_batch_size=1,
+            predictor=self.model,
+            overlap=0.25,
+            device=self.device,
+        )
         heatmap = self._postprocess(output, metadata)
 
         # Post-process
@@ -452,10 +468,24 @@ class CaseInferencer:
         # Enable dropout for MC sampling
         self._enable_dropout(self.model)
 
+        from monai.inferers import sliding_window_inference
+        
+        preproc_cfg = self.config.get("preprocessing", {})
+        roi_size = preproc_cfg.get("val_patch_size", [128, 128, 128])
+        if isinstance(roi_size, list):
+            roi_size = tuple(roi_size)
+
         predictions: List[np.ndarray] = []
         for i in range(num_passes):
             with torch.no_grad():
-                output = self.model(input_tensor)
+                output = sliding_window_inference(
+                    inputs=input_tensor,
+                    roi_size=roi_size,
+                    sw_batch_size=1,
+                    predictor=self.model,
+                    overlap=0.25,
+                    device=self.device,
+                )
             pred = self._postprocess(output, metadata)
             predictions.append(pred)
             if (i + 1) % 5 == 0:
