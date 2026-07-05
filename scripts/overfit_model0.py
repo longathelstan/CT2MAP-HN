@@ -93,7 +93,7 @@ def main():
     with torch.no_grad():
         preds = model(ct)
         pred_heatmap = preds["heatmap"].cpu().numpy()
-        pred_lesion = torch.sigmoid(preds["lesion"]).cpu().numpy()
+        pred_lesion = preds["lesion"].cpu().numpy()
     
     heatmap_target_np = heatmap_target.cpu().numpy()
     lesion_target_np = lesion_target.cpu().numpy()
@@ -112,7 +112,7 @@ def main():
         dice = (2.0 * intersection) / (p_lesion.sum() + t_lesion.sum() + 1e-6)
         
         # Quality check heatmap
-        p_heat = pred_heatmap[b, 0].cpu().numpy()
+        p_heat = pred_heatmap[b, 0]
         binary_heat = (p_heat >= 0.5).astype(np.uint8)
         components = extract_connected_components(binary_heat)
         flags = quality_check_heatmap(p_heat, components)

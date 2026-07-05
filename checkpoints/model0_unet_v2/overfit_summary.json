@@ -3,8 +3,27 @@
   "cases": [
     {
       "case_id": "MDA-174",
-      "lesion_dice": 0.01894664205610752,
-      "heatmap_flags": [
-        "UNIFORM_OUTPUT_FAILURE"
-      ],
-      "passed": 
+      "lesion_dice": 0.7391985058784485,
+      "heatmap_flags": [],
+      "passed": false
+    },
+    {
+      "case_id": "MDA-174",
+      "lesion_dice": 0.5754262804985046,
+      "heatmap_flags": [],
+      "passed": false
+    },
+    {
+      "case_id": "CHUM-056",
+      "lesion_dice": 0.9285451173782349,
+      "heatmap_flags": [],
+      "passed": true
+    },
+    {
+      "case_id": "CHUM-056",
+      "lesion_dice": 0.9097008109092712,
+      "heatmap_flags": [],
+      "passed": true
+    }
+  ]
+}
