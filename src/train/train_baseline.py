@@ -283,7 +283,7 @@ def _build_dataloaders(
         "spatial_size": aug_cfg.get("patch_size", [128, 128, 128]),
         "flip_prob": aug_cfg.get("random_flip_prob", 0.5),
         "flip_axes": [0, 1, 2],
-        "num_samples": 2,  # number of crops per volume
+        "num_samples": int(aug_cfg.get("num_samples", 2)),  # number of crops per volume
         "pos_ratio": 0.7,
         "affine_prob": 0.3,
         "gaussian_noise_prob": 0.2,

@@ -44,6 +44,13 @@ def main():
     # Restrict batch size and num workers for overfit
     config["training"]["batch_size"] = 2
     config["data"]["num_workers"] = 2
+    
+    # Enable faster convergence for overfitting smoke test
+    config.setdefault("optimizer", {})
+    config["optimizer"]["lr"] = 5.0e-3
+    config["data"].setdefault("augmentation", {})
+    config["data"]["augmentation"]["num_samples"] = 1
+    
     config.setdefault("model", {})
     config["model"]["name"] = "baseline_unet"
 

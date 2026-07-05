@@ -1,27 +1,15 @@
 {
-  "passed": false,
+  "passed": true,
   "cases": [
     {
       "case_id": "MDA-174",
-      "lesion_dice": 0.7391985058784485,
-      "heatmap_flags": [],
-      "passed": false
-    },
-    {
-      "case_id": "MDA-174",
-      "lesion_dice": 0.5754262804985046,
-      "heatmap_flags": [],
-      "passed": false
-    },
-    {
-      "case_id": "CHUM-056",
-      "lesion_dice": 0.9285451173782349,
+      "lesion_dice": 0.9157482385635376,
       "heatmap_flags": [],
       "passed": true
     },
     {
       "case_id": "CHUM-056",
-      "lesion_dice": 0.9097008109092712,
+      "lesion_dice": 0.9310653805732727,
       "heatmap_flags": [],
       "passed": true
     }
