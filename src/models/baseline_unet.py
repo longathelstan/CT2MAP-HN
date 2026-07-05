@@ -59,10 +59,19 @@ class BaselineUNet(nn.Module):
         use_uncertainty: bool = False,
         triage_hidden: int = 128,
         triage_dropout: float = 0.3,
+        norm: str = "batch",
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.use_uncertainty = use_uncertainty
+
+        # Map string norm name to MONAI norm tuple
+        _norm_map = {
+            "instance": ("instance", {"affine": True}),
+            "batch": ("batch", {"affine": True}),
+            "group": ("group", {"num_groups": 8, "affine": True}),
+        }
+        norm_cfg = _norm_map.get(norm.lower(), ("batch", {"affine": True}))
 
         # ---- Backbone ----
         # BasicUNet outputs `features[-1]` channels.
@@ -73,7 +82,7 @@ class BaselineUNet(nn.Module):
             features=tuple(int(f) for f in features),
             dropout=dropout,
             act=("leakyrelu", {"negative_slope": 0.01, "inplace": True}),
-            norm=("batch", {"affine": True}),
+            norm=norm_cfg,
             upsample="deconv",
         )
 

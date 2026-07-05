@@ -400,8 +400,8 @@ class CombinedLoss(nn.Module):
         target_heatmap: torch.Tensor,
         pred_lesion: torch.Tensor,
         target_lesion: torch.Tensor,
-        pred_triage: torch.Tensor,
-        target_triage: torch.Tensor,
+        pred_triage: Optional[torch.Tensor] = None,
+        target_triage: Optional[torch.Tensor] = None,
         lesion_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Compute combined loss.
@@ -411,8 +411,8 @@ class CombinedLoss(nn.Module):
             target_heatmap: ``(B, 1, D, H, W)`` target heatmap.
             pred_lesion: ``(B, 1, D, H, W)`` predicted lesion mask.
             target_lesion: ``(B, 1, D, H, W)`` target lesion mask.
-            pred_triage: ``(B, 1)`` predicted triage probability.
-            target_triage: ``(B, 1)`` target triage label.
+            pred_triage: ``(B, 1)`` predicted triage probability (optional if w_triage=0).
+            target_triage: ``(B, 1)`` target triage label (optional if w_triage=0).
             lesion_mask: Optional mask for focal heatmap weighting.
 
         Returns:
@@ -420,7 +420,11 @@ class CombinedLoss(nn.Module):
         """
         l_heat = self.heatmap_loss(pred_heatmap, target_heatmap, lesion_mask)
         l_les = self.lesion_loss(pred_lesion, target_lesion)
-        l_tri = self.triage_loss(pred_triage, target_triage)
+        
+        if self.w_triage > 0.0 and pred_triage is not None and target_triage is not None:
+            l_tri = self.triage_loss(pred_triage, target_triage)
+        else:
+            l_tri = torch.tensor(0.0, device=pred_heatmap.device)
 
         total = (
             self.w_heatmap * l_heat
@@ -492,13 +496,13 @@ class CombinedDistillLoss(nn.Module):
         target_heatmap: torch.Tensor,
         pred_lesion: torch.Tensor,
         target_lesion: torch.Tensor,
-        pred_triage: torch.Tensor,
-        target_triage: torch.Tensor,
         # Distillation inputs
         student_feats: List[torch.Tensor],
         teacher_feats: List[torch.Tensor],
         student_output: torch.Tensor,
         teacher_output: torch.Tensor,
+        pred_triage: Optional[torch.Tensor] = None,
+        target_triage: Optional[torch.Tensor] = None,
         lesion_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Compute combined task + distillation loss.

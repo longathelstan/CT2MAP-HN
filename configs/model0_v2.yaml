@@ -1,0 +1,78 @@
+# ============================================================================
+# CT2MAP-HN: Model 0 Baseline v2
+# BasicUNet (InstanceNorm) — CT → Heatmap + Lesion (no triage)
+# Reset sạch, schema khớp 100% với code
+# ============================================================================
+
+# --- Preprocessing (PHẢI khớp với data pipeline) ---
+preprocessing:
+  target_spacing: [1.0, 1.0, 1.0]
+  hu_min: -200
+  hu_max: 300
+
+# --- Model Architecture ---
+model:
+  name: baseline_unet
+  in_channels: 1
+  features: [32, 64, 128, 256, 512, 32]
+  dropout: 0.1
+  norm: instance        # InstanceNorm — bắt buộc cho batch size nhỏ 3D
+
+# --- Training ---
+training:
+  num_epochs: 300
+  batch_size: 2          # Source-of-truth cho DataLoader batch_size
+  use_amp: true
+  grad_accumulation_steps: 2   # effective batch = 2 × 2 = 4
+  clip_grad_norm: 1.0
+  val_interval: 5
+  save_interval: 50
+  early_stop_patience: 30
+
+# --- Optimizer ---
+optimizer:
+  name: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+
+# --- Scheduler ---
+scheduler:
+  name: cosine
+  eta_min: 1.0e-6
+
+# --- Loss ---
+loss:
+  w_heatmap: 1.0
+  w_lesion: 1.0
+  w_triage: 0.0            # Tắt triage cho Model 0
+  heatmap:
+    base: l1               # L1 thay vì MSE — tránh lazy mean prediction
+    use_focal: true
+    focal_gamma: 2.0
+    lesion_weight: 10.0     # Upweight lesion voxels 10×
+  lesion:
+    dice_weight: 1.0
+    bce_weight: 1.0
+    use_focal: true
+    focal_alpha: 0.75       # Tăng positive emphasis
+    focal_gamma: 2.0
+
+# --- Paths ---
+paths:
+  checkpoint_dir: checkpoints/model0_unet_v2
+  tensorboard_dir: runs/model0_unet_v2
+  metrics_dir: results/model0_unet_v2
+
+# --- Data ---
+data:
+  config: configs/data.yaml
+  num_workers: 8
+  pin_memory: true
+  augmentation:
+    patch_size: [128, 128, 128]
+    random_flip_prob: 0.5
+  val_patch_size: [128, 128, 128]
+  val_overlap: 0.25
+
+# --- Reproducibility ---
+seed: 42

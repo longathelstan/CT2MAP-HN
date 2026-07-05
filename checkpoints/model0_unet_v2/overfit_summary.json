@@ -1,0 +1,10 @@
+{
+  "passed": false,
+  "cases": [
+    {
+      "case_id": "MDA-174",
+      "lesion_dice": 0.01894664205610752,
+      "heatmap_flags": [
+        "UNIFORM_OUTPUT_FAILURE"
+      ],
+      "passed": 

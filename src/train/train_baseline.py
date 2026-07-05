@@ -120,32 +120,127 @@ def _build_scheduler(
         raise ValueError(f"Unsupported scheduler: {name}")
 
 
-def _build_loss(cfg: Dict[str, Any]) -> CombinedLoss:
-    """Build the combined task loss from config.
+def _validate_config(config: Dict[str, Any]) -> None:
+    """Validate config schema and fail fast on missing required keys.
+
+    Also warns about legacy keys that are silently ignored.
 
     Args:
-        cfg: Loss config dict.
+        config: Full experiment config dict.
 
-    Returns:
-        :class:`CombinedLoss` instance.
+    Raises:
+        ValueError: If required top-level sections or keys are missing,
+            or if legacy keys are detected.
     """
-    return CombinedLoss(
-        heatmap_loss_cfg=cfg.get("heatmap", {}),
-        lesion_loss_cfg=cfg.get("lesion", {}),
-        triage_loss_cfg=cfg.get("triage", {}),
-        w_heatmap=float(cfg.get("w_heatmap", 1.0)),
-        w_lesion=float(cfg.get("w_lesion", 1.0)),
-        w_triage=float(cfg.get("w_triage", 0.5)),
-    )
+    # --- Required top-level sections ---
+    required_sections = ["optimizer", "loss", "paths", "training"]
+    missing = [s for s in required_sections if s not in config]
+    if missing:
+        raise ValueError(
+            f"Config missing required sections: {missing}. "
+            f"Make sure you are using the correct config file (e.g. configs/model0_v2.yaml)."
+        )
+
+    # --- Required keys within sections ---
+    required_keys = {
+        "training": ["num_epochs"],
+        "optimizer": ["name", "lr"],
+        "paths": ["checkpoint_dir"],
+    }
+    for section, keys in required_keys.items():
+        cfg_section = config.get(section, {})
+        missing_keys = [k for k in keys if k not in cfg_section]
+        if missing_keys:
+            raise ValueError(
+                f"Config section '{section}' missing required keys: {missing_keys}"
+            )
+
+    # --- Detect legacy keys that would be silently ignored ---
+    legacy_detections = []
+    training_cfg = config.get("training", {})
+    if "epochs" in training_cfg and "num_epochs" not in training_cfg:
+        legacy_detections.append(
+            "training.epochs → should be training.num_epochs"
+        )
+    if "lr" in training_cfg:
+        legacy_detections.append(
+            "training.lr → should be optimizer.lr"
+        )
+    if "optimizer" in training_cfg and isinstance(training_cfg["optimizer"], str):
+        legacy_detections.append(
+            "training.optimizer → should be optimizer.name (top-level)"
+        )
+    if "loss" in training_cfg:
+        legacy_detections.append(
+            "training.loss → should be loss (top-level section)"
+        )
+    if "scheduler" in training_cfg and isinstance(training_cfg["scheduler"], dict):
+        sched = training_cfg["scheduler"]
+        if "type" in sched and "name" not in config.get("scheduler", {}):
+            legacy_detections.append(
+                "training.scheduler.type → should be scheduler.name (top-level)"
+            )
+
+    if legacy_detections:
+        msg = "Legacy config keys detected (these would be SILENTLY IGNORED):\n"
+        for d in legacy_detections:
+            msg += f"  - {d}\n"
+        msg += "Please use configs/model0_v2.yaml with correct schema."
+        raise ValueError(msg)
+
+    logger.info("Config validation passed.")
+
+
+def _print_resolved_config(config: Dict[str, Any]) -> None:
+    """Print resolved hyperparameters before training starts.
+
+    Args:
+        config: Full experiment config dict.
+    """
+    training = config.get("training", {})
+    opt = config.get("optimizer", {})
+    sched = config.get("scheduler", {})
+    loss = config.get("loss", {})
+    paths = config.get("paths", {})
+    preproc = config.get("preprocessing", {})
+
+    # Batch size: training.batch_size is source-of-truth
+    batch_size = training.get("batch_size", config.get("data", {}).get("batch_size", 4))
+    accum = training.get("grad_accumulation_steps", 1)
+
+    info = f"""
+╔══════════════════════════════════════════════╗
+║         RESOLVED TRAINING CONFIG             ║
+╠══════════════════════════════════════════════╣
+║  Epochs:           {training.get('num_epochs', '?'):<25}║
+║  Batch size:       {batch_size:<25}║
+║  Grad accumulation:{accum:<25}║
+║  Effective batch:  {batch_size * accum:<25}║
+║  AMP:              {training.get('use_amp', False)!s:<25}║
+║  Grad clip norm:   {training.get('clip_grad_norm', 'None')!s:<25}║
+║  Optimizer:        {opt.get('name', '?'):<25}║
+║  LR:               {opt.get('lr', '?')!s:<25}║
+║  Weight decay:     {opt.get('weight_decay', '?')!s:<25}║
+║  Scheduler:        {sched.get('name', '?'):<25}║
+║  Loss weights:     H={loss.get('w_heatmap', 1.0)} L={loss.get('w_lesion', 1.0)} T={loss.get('w_triage', 0.5):<5}║
+║  Heatmap loss:     {loss.get('heatmap', {}).get('base', 'mse'):<25}║
+║  HU range:         [{preproc.get('hu_min', -1024)}, {preproc.get('hu_max', 1024)}]{'':<14}║
+║  Checkpoint dir:   {paths.get('checkpoint_dir', '?'):<25}║
+╚══════════════════════════════════════════════╝"""
+    logger.info(info)
 
 
 def _build_dataloaders(
     cfg: Dict[str, Any],
+    training_cfg: Dict[str, Any] | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train and validation DataLoaders using real HECKTOR data.
 
     Args:
-        cfg: Data config dict from baseline_nnunet.yaml (typically config.get("data", {})).
+        cfg: Data config dict from config.get("data", {}).
+        training_cfg: Training config dict. If provided, ``batch_size``
+            is read from here as source-of-truth, with fallback to
+            ``cfg["batch_size"]``.
 
     Returns:
         Tuple of ``(train_loader, val_loader)``.
@@ -170,7 +265,15 @@ def _build_dataloaders(
     else:
         dataset_target_type = target_type
 
-    batch_size = int(cfg.get("batch_size", 4))
+    # Batch size: training.batch_size is source-of-truth
+    if training_cfg is not None and "batch_size" in training_cfg:
+        batch_size = int(training_cfg["batch_size"])
+    else:
+        batch_size = int(cfg.get("batch_size", 4))
+    logger.info("DataLoader batch_size = %d (source: %s)",
+                batch_size,
+                "training.batch_size" if training_cfg and "batch_size" in training_cfg else "data.batch_size")
+
     num_workers = int(cfg.get("num_workers", 8))
     pin_memory = bool(cfg.get("pin_memory", True))
 
@@ -285,6 +388,27 @@ def _build_dataloaders(
 
     return train_loader, val_loader
 
+# ====================================================================
+# Loss builder
+# ====================================================================
+def _build_loss(cfg: Dict[str, Any]) -> CombinedLoss:
+    """Build the combined task loss from config.
+
+    Args:
+        cfg: Loss config dict.
+
+    Returns:
+        :class:`CombinedLoss` instance.
+    """
+    return CombinedLoss(
+        heatmap_loss_cfg=cfg.get("heatmap", {}),
+        lesion_loss_cfg=cfg.get("lesion", {}),
+        triage_loss_cfg=cfg.get("triage", {}),
+        w_heatmap=float(cfg.get("w_heatmap", 1.0)),
+        w_lesion=float(cfg.get("w_lesion", 1.0)),
+        w_triage=float(cfg.get("w_triage", 0.5)),
+    )
+
 
 # ====================================================================
 # Main
@@ -321,6 +445,12 @@ def main(args: argparse.Namespace | None = None) -> None:
     )
     logger.info("Config loaded from: %s", config_path)
 
+    # ---- Validate config schema (fail fast) ----
+    _validate_config(config)
+
+    # ---- Print resolved config ----
+    _print_resolved_config(config)
+
     # ---- Seed ----
     seed = int(config.get("seed", 42))
     _seed_everything(seed)
@@ -331,13 +461,16 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     # ---- Ensure model config specifies baseline_unet ----
     config.setdefault("model", {})
-    config["model"]["name"] = "baseline_unet"
+    config["model"].setdefault("name", "baseline_unet")
 
     # ---- Build components ----
     model = build_model(config)
     logger.info("Model: %s", type(model).__name__)
 
-    train_loader, val_loader = _build_dataloaders(config.get("data", {}))
+    train_loader, val_loader = _build_dataloaders(
+        config.get("data", {}),
+        training_cfg=config.get("training", {}),
+    )
 
     optimizer = _build_optimizer(model, config.get("optimizer", {}))
     num_epochs = int(config.get("training", {}).get("num_epochs", 100))
@@ -366,9 +499,8 @@ def main(args: argparse.Namespace | None = None) -> None:
     results = trainer.fit()
 
     # ---- Save final metrics ----
-    metrics_path = Path(
-        config.get("paths", {}).get("metrics_dir", "results")
-    ) / "baseline_metrics.json"
+    metrics_dir = config.get("paths", {}).get("metrics_dir", "results")
+    metrics_path = Path(metrics_dir) / "baseline_metrics.json"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(

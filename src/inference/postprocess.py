@@ -178,6 +178,45 @@ def _enrich_components_with_heatmap(
     return components
 
 
+def quality_check_heatmap(
+    heatmap: np.ndarray,
+    components: List[Dict[str, Any]],
+    threshold: float = 0.5,
+) -> List[str]:
+    """Perform a quality check on the predicted heatmap.
+
+    Returns a list of flags indicating potential failure modes:
+    - ``UNIFORM_OUTPUT_FAILURE``: The largest connected component covers > 25% of the ROI.
+    - ``LOW_QUALITY_HEATMAP``: The median is near 0.5 and a large fraction of voxels are positive.
+
+    Args:
+        heatmap: 3-D predicted heatmap.
+        components: Extracted connected components (sorted by volume).
+        threshold: Threshold used for binarization.
+
+    Returns:
+        List of flag strings. Empty list means the heatmap passed checks.
+    """
+    flags = []
+    total_voxels = max(heatmap.size, 1)
+
+    if components:
+        largest_fraction = components[0]["volume_voxels"] / total_voxels
+        if largest_fraction > 0.25:
+            flags.append("UNIFORM_OUTPUT_FAILURE")
+
+    median_val = float(np.median(heatmap))
+    positive_fraction = float((heatmap >= threshold).sum()) / total_voxels
+
+    if 0.45 <= median_val <= 0.55 and positive_fraction > 0.1:
+        flags.append("LOW_QUALITY_HEATMAP")
+
+    if flags:
+        logger.warning("Heatmap quality checks failed: %s", flags)
+    
+    return flags
+
+
 def compute_triage_score(
     heatmap: np.ndarray,
     lesion_candidates: List[Dict[str, Any]],
