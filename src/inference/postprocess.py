@@ -65,6 +65,9 @@ def extract_connected_components(
     """Extract connected components (lesion candidates) from a binary mask.
 
     Uses ``scipy.ndimage.label`` for 3-D connected-component analysis.
+    Internally vectorised: ``find_objects`` and ``np.bincount`` are called
+    once for *all* labels, and ``center_of_mass`` is computed only within
+    the (small) bounding box of each qualifying component.
 
     Each returned dict contains:
         - ``label``: int – component label (1-indexed).
@@ -103,23 +106,39 @@ def extract_connected_components(
     labelled, num_features = ndimage.label(binary_mask)
     logger.debug("Found %d raw connected components", num_features)
 
+    if num_features == 0:
+        return []
+
+    # --- Vectorised volume computation (single pass over labelled) ---
+    volumes = np.bincount(labelled.ravel(), minlength=num_features + 1)
+
+    # --- Vectorised bounding boxes (single pass) ---
+    all_bboxes = ndimage.find_objects(labelled)  # list of (slice, slice, slice)
+
     components: List[Dict[str, Any]] = []
     for lbl in range(1, num_features + 1):
-        component_mask = labelled == lbl
-        volume = int(component_mask.sum())
-        if volume < min_size:
+        vol = int(volumes[lbl])
+        if vol < min_size:
             continue
 
+        bbox = all_bboxes[lbl - 1]  # find_objects returns 0-indexed list
+        if bbox is None:
+            continue
+
+        # Compute centroid only within the small bounding-box region
+        local_mask = labelled[bbox] == lbl
+        local_centroid = ndimage.center_of_mass(local_mask)
+
+        # Translate local centroid back to global coordinates
         centroid = tuple(
-            float(c) for c in ndimage.center_of_mass(component_mask)
+            float(lc + sl.start)
+            for lc, sl in zip(local_centroid, bbox)
         )
-        bbox = ndimage.find_objects(labelled == lbl)[0]
-        # We only have the binary mask here; max_intensity is set to 1.0.
-        # Callers can enrich this with the actual heatmap values.
+
         components.append(
             {
                 "label": lbl,
-                "volume_voxels": volume,
+                "volume_voxels": vol,
                 "centroid": centroid,
                 "bounding_box": bbox,
                 "max_intensity": 1.0,

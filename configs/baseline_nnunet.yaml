@@ -4,6 +4,12 @@
 # Optimized for 4× RTX A6000 (48GB VRAM each)
 # ============================================================================
 
+# --- Preprocessing (must match training data pipeline) ---
+preprocessing:
+  target_spacing: [1.0, 1.0, 1.0]
+  hu_min: -200
+  hu_max: 300
+
 # --- Model Architecture ---
 model:
   # Model type: basicunet | nnunet

@@ -137,14 +137,14 @@ class CaseInferencer:
         """
         model_cfg = self.config.get("model", {})
         model_type = model_cfg.get("type", "basic_unet").lower()
-        if model_type == "basicunet":
-            model_type = "basic_unet"
+        # Normalise aliases: "basicunet" → "basic_unet", "swinunetr" → "swin_unetr"
+        model_type_normalised = model_type.replace("_", "")
 
         in_channels = model_cfg.get("in_channels", 1)
         out_channels = model_cfg.get("out_channels", 1)
         spatial_dims = model_cfg.get("spatial_dims", 3)
 
-        if model_type == "swin_unetr":
+        if model_type_normalised == "swinunetr":
             from monai.networks.nets import SwinUNETR  # type: ignore[import-untyped]
 
             img_size = model_cfg.get("img_size", (96, 96, 96))
@@ -166,7 +166,7 @@ class CaseInferencer:
                 spatial_dims=spatial_dims,
             )
 
-        elif model_type == "basic_unet":
+        elif model_type_normalised == "basicunet":
             from monai.networks.nets import BasicUNet  # type: ignore[import-untyped]
 
             features = model_cfg.get(
@@ -184,7 +184,7 @@ class CaseInferencer:
                 dropout=dropout,
             )
 
-        elif model_type == "unet":
+        elif model_type_normalised == "unet":
             from monai.networks.nets import UNet  # type: ignore[import-untyped]
 
             channels = model_cfg.get("channels", (16, 32, 64, 128, 256))
@@ -310,7 +310,7 @@ class CaseInferencer:
         resampler.SetOutputOrigin(image.GetOrigin())
         resampler.SetTransform(sitk.Transform())
         resampler.SetDefaultPixelValue(float(sitk.GetArrayFromImage(image).min()))
-        resampler.SetInterpolator(sitk.sitkBSpline)
+        resampler.SetInterpolator(sitk.sitkLinear)
 
         return resampler.Execute(image)
 
@@ -350,7 +350,11 @@ class CaseInferencer:
 
     @torch.no_grad()
     def infer(self, ct_path: str) -> Dict[str, Any]:
-        """Run single-pass inference on a CT volume.
+        """Run sliding-window inference on a CT volume.
+
+        Uses MONAI ``SlidingWindowInferer`` to process the volume in
+        small patches (default 128³ with 50 % overlap), keeping VRAM
+        usage bounded.  AMP (float16) is used when running on CUDA.
 
         Args:
             ct_path: Path to the CT NIfTI file.
@@ -373,28 +377,19 @@ class CaseInferencer:
         t0 = time.time()
 
         # Preprocess
+        t_step = time.time()
         input_tensor, metadata = self._preprocess(ct_path)
+        logger.info("  [timing] preprocess: %.2fs", time.time() - t_step)
 
-        # Forward pass using sliding window inference to avoid CUDA OOM
-        from monai.inferers import sliding_window_inference
-        
-        preproc_cfg = self.config.get("preprocessing", {})
-        roi_size = preproc_cfg.get("val_patch_size", [128, 128, 128])
-        if isinstance(roi_size, list):
-            roi_size = tuple(roi_size)
-
+        # Forward pass — sliding window
+        t_step = time.time()
         self.model.eval()
-        output = sliding_window_inference(
-            inputs=input_tensor,
-            roi_size=roi_size,
-            sw_batch_size=1,
-            predictor=self.model,
-            overlap=0.25,
-            device=self.device,
-        )
+        output = self._sliding_window_forward(input_tensor)
         heatmap = self._postprocess(output, metadata)
+        logger.info("  [timing] forward + postprocess: %.2fs", time.time() - t_step)
 
         # Post-process
+        t_step = time.time()
         postproc_cfg = self.config.get("postprocessing", {})
         threshold = postproc_cfg.get("threshold", 0.5)
         min_component_size = postproc_cfg.get("min_component_size", 100)
@@ -412,6 +407,7 @@ class CaseInferencer:
             cand["mean_intensity"] = float(region.mean())
 
         triage = compute_triage_score(heatmap, candidates)
+        logger.info("  [timing] postprocess (CC + triage): %.2fs", time.time() - t_step)
 
         elapsed = time.time() - t0
         logger.info("Inference completed in %.2fs (triage=%.4f)", elapsed, triage)
@@ -426,6 +422,44 @@ class CaseInferencer:
             "elapsed_seconds": elapsed,
         }
 
+    def _sliding_window_forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """Run a forward pass using MONAI SlidingWindowInferer + AMP.
+
+        Reads ``roi_size`` and ``overlap`` from config (falls back to
+        128³ / 0.5).  Uses float16 AMP on CUDA for ~2× speedup.
+
+        Args:
+            input_tensor: Preprocessed CT tensor (B×1×D×H×W).
+
+        Returns:
+            Raw model output tensor (same spatial dims as input).
+        """
+        from monai.inferers import SlidingWindowInferer  # type: ignore[import-untyped]
+
+        inf_cfg = self.config.get("inference", {})
+        roi_size = inf_cfg.get("roi_size", [128, 128, 128])
+        if isinstance(roi_size, list):
+            roi_size = tuple(roi_size)
+        overlap = inf_cfg.get("overlap", 0.25)
+        sw_batch_size = inf_cfg.get("sw_batch_size", 4)
+
+        inferer = SlidingWindowInferer(
+            roi_size=roi_size,
+            sw_batch_size=sw_batch_size,
+            overlap=overlap,
+            mode="gaussian",
+            progress=True,
+        )
+
+        use_amp = self.device.type == "cuda"
+        if use_amp:
+            with torch.amp.autocast("cuda"):
+                output = inferer(input_tensor, self.model)
+        else:
+            output = inferer(input_tensor, self.model)
+
+        return output
+
     def infer_with_mc_dropout(
         self,
         ct_path: str,
@@ -434,8 +468,9 @@ class CaseInferencer:
         """Run MC Dropout inference for uncertainty estimation.
 
         Enables dropout at inference time and runs *num_passes* stochastic
-        forward passes.  The mean prediction is used as the heatmap and the
-        voxel-wise standard deviation as the uncertainty map.
+        forward passes using sliding window.  The mean prediction is used
+        as the heatmap and the voxel-wise standard deviation as the
+        uncertainty map.
 
         Args:
             ct_path: Path to the CT NIfTI file.
@@ -468,24 +503,10 @@ class CaseInferencer:
         # Enable dropout for MC sampling
         self._enable_dropout(self.model)
 
-        from monai.inferers import sliding_window_inference
-        
-        preproc_cfg = self.config.get("preprocessing", {})
-        roi_size = preproc_cfg.get("val_patch_size", [128, 128, 128])
-        if isinstance(roi_size, list):
-            roi_size = tuple(roi_size)
-
         predictions: List[np.ndarray] = []
         for i in range(num_passes):
             with torch.no_grad():
-                output = sliding_window_inference(
-                    inputs=input_tensor,
-                    roi_size=roi_size,
-                    sw_batch_size=1,
-                    predictor=self.model,
-                    overlap=0.25,
-                    device=self.device,
-                )
+                output = self._sliding_window_forward(input_tensor)
             pred = self._postprocess(output, metadata)
             predictions.append(pred)
             if (i + 1) % 5 == 0:
@@ -595,10 +616,45 @@ class CaseInferencer:
         else:
             ref_image = None
 
+        def _resample_to_reference(
+            array: np.ndarray,
+            ref: Any,
+        ) -> np.ndarray:
+            """Resample a 3-D array back to the reference image geometry.
+
+            This ensures the output NIfTI has the same dimensions as the
+            original CT so it can be overlaid directly in viewers like
+            ITK-SNAP.
+            """
+            src_image = sitk.GetImageFromArray(array)
+            # Inherit spacing from preprocessing target (isotropic)
+            preproc_cfg = self.config.get("preprocessing", {})
+            target_spacing = preproc_cfg.get("target_spacing", [1.0, 1.0, 1.0])
+            src_image.SetSpacing(target_spacing)
+            src_image.SetOrigin(ref.GetOrigin())
+            src_image.SetDirection(ref.GetDirection())
+
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetReferenceImage(ref)
+            resampler.SetInterpolator(sitk.sitkLinear)
+            resampler.SetDefaultPixelValue(0.0)
+            resampled = resampler.Execute(src_image)
+            return sitk.GetArrayFromImage(resampled).astype(array.dtype)
+
         def _save_nifti(array: np.ndarray, name: str) -> None:
+            # Resample back to original CT space if dimensions differ
+            if ref_image is not None:
+                ref_size = ref_image.GetSize()  # (W, H, D) in SimpleITK
+                arr_size = tuple(reversed(array.shape))  # numpy (D, H, W) → (W, H, D)
+                if arr_size != ref_size:
+                    logger.info(
+                        "Resampling %s from %s to %s (original CT space)",
+                        name, arr_size, ref_size,
+                    )
+                    array = _resample_to_reference(array, ref_image)
+
             image = sitk.GetImageFromArray(array)
             if ref_image is not None:
-                # Only copy metadata if shapes match
                 if image.GetSize() == ref_image.GetSize():
                     image.CopyInformation(ref_image)
             sitk.WriteImage(image, str(out / name))
