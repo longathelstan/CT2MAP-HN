@@ -5,7 +5,7 @@
 
 preprocess:
   # --- I/O Directories ---
-  input_dir: /mnt/d/LowngWorkspace/hecktor_raw
+  input_dir: /data/lowngworkspace/hecktor_raw
   output_dir: data/processed
 
   # --- Resampling ---

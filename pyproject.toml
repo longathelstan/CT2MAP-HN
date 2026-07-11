@@ -42,7 +42,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ct2map*"]
+include = ["src*"]
 
 # --- Ruff (linter + formatter) ---
 [tool.ruff]

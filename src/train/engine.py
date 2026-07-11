@@ -5,7 +5,7 @@ Provides :class:`Trainer`, a reusable training loop with:
 
 * Mixed-precision training (``torch.cuda.amp``).
 * Gradient accumulation.
-* Multi-GPU via ``DataParallel``.
+* Multi-GPU via ``DistributedDataParallel`` (DDP) or ``DataParallel``.
 * TensorBoard logging.
 * Checkpoint saving (best + periodic).
 * Early stopping.
@@ -23,8 +23,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
@@ -40,6 +42,64 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# ======================================================================
+# DDP Utility Functions
+# ======================================================================
+
+def setup_ddp(backend: str = "nccl") -> int:
+    """Initialize DDP process group.
+
+    Reads ``LOCAL_RANK``, ``RANK``, ``WORLD_SIZE`` environment variables
+    set automatically by ``torchrun``.
+
+    Args:
+        backend: Communication backend (``"nccl"`` for GPU).
+
+    Returns:
+        local_rank: The local rank of this process.
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
+    logger.info(
+        "DDP initialized: rank=%d  local_rank=%d  world_size=%d  backend=%s",
+        rank, local_rank, world_size, backend,
+    )
+    return local_rank
+
+
+def cleanup_ddp() -> None:
+    """Destroy the DDP process group."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_ddp_active() -> bool:
+    """Check if DDP is currently active."""
+    return dist.is_available() and dist.is_initialized()
+
+
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0).
+
+    Returns ``True`` when DDP is not active (single-GPU mode).
+    """
+    if not is_ddp_active():
+        return True
+    return dist.get_rank() == 0
+
+
+def get_world_size() -> int:
+    """Get the number of DDP processes (1 if not using DDP)."""
+    if not is_ddp_active():
+        return 1
+    return dist.get_world_size()
+
+
 class Trainer:
     """Configurable training engine for CT2MAP-HN models.
 
@@ -52,6 +112,7 @@ class Trainer:
         val_loader: Validation :class:`DataLoader`.
         config: Full experiment config dictionary.
         device: Target device (e.g. ``"cuda:0"``).
+        local_rank: Local GPU rank for DDP. If ``-1``, DDP is not used.
     """
 
     def __init__(
@@ -64,8 +125,10 @@ class Trainer:
         val_loader: DataLoader,
         config: Dict[str, Any],
         device: Union[str, torch.device] = "cuda",
+        local_rank: int = -1,
     ) -> None:
         self.config = config
+        self.local_rank = local_rank
         self.device = torch.device(device)
 
         # ---- Training hyper-params from config ----
@@ -79,15 +142,28 @@ class Trainer:
         self.early_stop_patience: int = train_cfg.get("early_stop_patience", 20)
 
         # ---- Multi-GPU ----
-        self.use_data_parallel: bool = train_cfg.get("use_data_parallel", False)
-        if self.use_data_parallel and torch.cuda.device_count() > 1:
+        self.use_ddp = is_ddp_active()
+        if self.use_ddp:
+            # Wrap model with DistributedDataParallel
+            model = model.to(self.device)
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                        find_unused_parameters=True)
             logger.info(
-                "Wrapping model in DataParallel (%d GPUs).",
-                torch.cuda.device_count(),
+                "Model wrapped with DistributedDataParallel (rank=%d, world_size=%d).",
+                dist.get_rank(), dist.get_world_size(),
             )
-            model = nn.DataParallel(model)
-        self.model = model.to(self.device)
+        else:
+            # Fallback: DataParallel for non-DDP multi-GPU
+            use_data_parallel: bool = train_cfg.get("use_data_parallel", False)
+            if use_data_parallel and torch.cuda.device_count() > 1:
+                logger.info(
+                    "Wrapping model in DataParallel (%d GPUs).",
+                    torch.cuda.device_count(),
+                )
+                model = nn.DataParallel(model)
+            model = model.to(self.device)
 
+        self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.loss_fn = loss_fn
@@ -97,15 +173,19 @@ class Trainer:
         # ---- AMP scaler ----
         self.scaler = GradScaler(enabled=self.use_amp)
 
-        # ---- Checkpoint dir ----
+        # ---- Checkpoint dir (only rank 0 creates) ----
         self.checkpoint_dir = Path(
             config.get("paths", {}).get("checkpoint_dir", "checkpoints")
         )
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        if is_main_process():
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---- TensorBoard ----
+        # ---- TensorBoard (only rank 0 writes) ----
         tb_dir = config.get("paths", {}).get("tensorboard_dir", "runs")
-        self.writer = SummaryWriter(log_dir=tb_dir)
+        if is_main_process():
+            self.writer = SummaryWriter(log_dir=tb_dir)
+        else:
+            self.writer = None
 
         # ---- State tracking ----
         self.current_epoch: int = 0
@@ -128,8 +208,14 @@ class Trainer:
         running: Dict[str, float] = {}
         n_batches = 0
 
+        # Set epoch on DistributedSampler for proper shuffling
+        if self.use_ddp and hasattr(self.train_loader, "sampler"):
+            sampler = self.train_loader.sampler
+            if hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(self.current_epoch)
+
         iterator = self.train_loader
-        if _HAS_TQDM:
+        if _HAS_TQDM and is_main_process():
             iterator = tqdm(
                 iterator,
                 desc=f"Train Epoch {self.current_epoch}",
@@ -171,7 +257,7 @@ class Trainer:
             n_batches += 1
 
             # Update progress bar
-            if _HAS_TQDM and isinstance(iterator, tqdm):
+            if _HAS_TQDM and is_main_process() and isinstance(iterator, tqdm):
                 iterator.set_postfix(
                     loss=f"{loss_dict['total'].item():.4f}",
                     lr=f"{self.optimizer.param_groups[0]['lr']:.2e}",
@@ -180,12 +266,13 @@ class Trainer:
         # Average metrics
         avg_metrics = {k: v / max(n_batches, 1) for k, v in running.items()}
 
-        # Log to TensorBoard
-        for k, v in avg_metrics.items():
-            self.writer.add_scalar(f"train/{k}", v, self.current_epoch)
-        self.writer.add_scalar(
-            "train/lr", self.optimizer.param_groups[0]["lr"], self.current_epoch
-        )
+        # Log to TensorBoard (rank 0 only)
+        if self.writer is not None:
+            for k, v in avg_metrics.items():
+                self.writer.add_scalar(f"train/{k}", v, self.current_epoch)
+            self.writer.add_scalar(
+                "train/lr", self.optimizer.param_groups[0]["lr"], self.current_epoch
+            )
 
         return avg_metrics
 
@@ -204,7 +291,7 @@ class Trainer:
         n_batches = 0
 
         iterator = self.val_loader
-        if _HAS_TQDM:
+        if _HAS_TQDM and is_main_process():
             iterator = tqdm(iterator, desc="Validate", leave=False)
 
         for batch in iterator:
@@ -222,8 +309,9 @@ class Trainer:
 
         avg_metrics = {k: v / max(n_batches, 1) for k, v in running.items()}
 
-        for k, v in avg_metrics.items():
-            self.writer.add_scalar(f"val/{k}", v, self.current_epoch)
+        if self.writer is not None:
+            for k, v in avg_metrics.items():
+                self.writer.add_scalar(f"val/{k}", v, self.current_epoch)
 
         return avg_metrics
 
@@ -243,12 +331,14 @@ class Trainer:
         if num_epochs is not None:
             self.num_epochs = num_epochs
 
-        logger.info(
-            "Starting training: %d epochs, device=%s, AMP=%s, "
-            "grad_accum=%d, early_stop=%d",
-            self.num_epochs, self.device, self.use_amp,
-            self.grad_accum_steps, self.early_stop_patience,
-        )
+        if is_main_process():
+            logger.info(
+                "Starting training: %d epochs, device=%s, AMP=%s, "
+                "grad_accum=%d, early_stop=%d, DDP=%s, world_size=%d",
+                self.num_epochs, self.device, self.use_amp,
+                self.grad_accum_steps, self.early_stop_patience,
+                self.use_ddp, get_world_size(),
+            )
 
         for epoch in range(self.current_epoch, self.num_epochs):
             self.current_epoch = epoch
@@ -265,28 +355,40 @@ class Trainer:
 
                 val_loss = val_metrics.get("total", float("inf"))
 
-                # Best model tracking
+                # Synchronize val_loss across all ranks for consistent early stopping
+                if self.use_ddp:
+                    val_loss_tensor = torch.tensor([val_loss], device=self.device)
+                    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
+                    val_loss = val_loss_tensor.item()
+
+                # Best model tracking (all ranks check, only rank 0 saves)
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self.epochs_without_improvement = 0
-                    self._save_checkpoint("best_model.pth", is_best=True)
-                    logger.info(
-                        "New best val loss: %.6f (epoch %d)", val_loss, epoch
-                    )
+                    if is_main_process():
+                        self._save_checkpoint("best_model.pth", is_best=True)
+                        logger.info(
+                            "New best val loss: %.6f (epoch %d)", val_loss, epoch
+                        )
                 else:
                     self.epochs_without_improvement += 1
 
-                # Early stopping
+                # Early stopping (all ranks must agree)
                 if (
                     self.early_stop_patience > 0
                     and self.epochs_without_improvement >= self.early_stop_patience
                 ):
-                    logger.info(
-                        "Early stopping triggered after %d epochs without "
-                        "improvement.",
-                        self.epochs_without_improvement,
-                    )
+                    if is_main_process():
+                        logger.info(
+                            "Early stopping triggered after %d epochs without "
+                            "improvement.",
+                            self.epochs_without_improvement,
+                        )
                     break
+
+                # Barrier after validation to keep ranks in sync
+                if self.use_ddp:
+                    dist.barrier()
             else:
                 val_metrics = {}
 
@@ -294,26 +396,29 @@ class Trainer:
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            # ---- Periodic checkpoint ----
-            if (epoch + 1) % self.save_interval == 0:
+            # ---- Periodic checkpoint (rank 0 only) ----
+            if is_main_process() and (epoch + 1) % self.save_interval == 0:
                 self._save_checkpoint(f"checkpoint_epoch_{epoch + 1:04d}.pth")
 
-            # ---- Epoch summary ----
+            # ---- Epoch summary (rank 0 only) ----
             elapsed = time.time() - epoch_start
-            logger.info(
-                "Epoch %d/%d  train_loss=%.5f  val_loss=%.5f  "
-                "lr=%.2e  time=%.1fs",
-                epoch + 1,
-                self.num_epochs,
-                train_metrics.get("total", 0.0),
-                val_metrics.get("total", 0.0),
-                self.optimizer.param_groups[0]["lr"],
-                elapsed,
-            )
+            if is_main_process():
+                logger.info(
+                    "Epoch %d/%d  train_loss=%.5f  val_loss=%.5f  "
+                    "lr=%.2e  time=%.1fs",
+                    epoch + 1,
+                    self.num_epochs,
+                    train_metrics.get("total", 0.0),
+                    val_metrics.get("total", 0.0),
+                    self.optimizer.param_groups[0]["lr"],
+                    elapsed,
+                )
 
-        # Final checkpoint
-        self._save_checkpoint("final_model.pth")
-        self.writer.close()
+        # Final checkpoint (rank 0 only)
+        if is_main_process():
+            self._save_checkpoint("final_model.pth")
+        if self.writer is not None:
+            self.writer.close()
 
         return {
             "best_val_loss": self.best_val_loss,
@@ -334,7 +439,7 @@ class Trainer:
         """
         model_to_save = (
             self.model.module
-            if isinstance(self.model, nn.DataParallel)
+            if isinstance(self.model, (nn.DataParallel, DDP))
             else self.model
         )
         state = {
@@ -368,12 +473,13 @@ class Trainer:
                 f"Checkpoint not found: {checkpoint_path}"
             )
 
-        logger.info("Resuming from checkpoint: %s", checkpoint_path)
+        if is_main_process():
+            logger.info("Resuming from checkpoint: %s", checkpoint_path)
         state = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         model_to_load = (
             self.model.module
-            if isinstance(self.model, nn.DataParallel)
+            if isinstance(self.model, (nn.DataParallel, DDP))
             else self.model
         )
         model_to_load.load_state_dict(state["model_state_dict"])
@@ -386,10 +492,11 @@ class Trainer:
         if self.scheduler is not None and "scheduler_state_dict" in state:
             self.scheduler.load_state_dict(state["scheduler_state_dict"])
 
-        logger.info(
-            "Resumed: epoch=%d  global_step=%d  best_val_loss=%.6f",
-            self.current_epoch, self.global_step, self.best_val_loss,
-        )
+        if is_main_process():
+            logger.info(
+                "Resumed: epoch=%d  global_step=%d  best_val_loss=%.6f",
+                self.current_epoch, self.global_step, self.best_val_loss,
+            )
 
     # ==================================================================
     # Internal helpers

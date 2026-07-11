@@ -13,9 +13,9 @@ set -euo pipefail
 # --- Defaults ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG="${PROJECT_ROOT}/configs/swin_unetr.yaml"
+CONFIG="${PROJECT_ROOT}/configs/swin_p40.yaml"
 DISTILL_CONFIG="${PROJECT_ROOT}/configs/distill.yaml"
-NUM_GPUS=4
+NUM_GPUS=2
 MASTER_PORT=29501
 USE_DISTILL=false
 

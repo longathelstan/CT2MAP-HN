@@ -6,7 +6,7 @@
 data:
   # --- Paths ---
   # Root directory containing raw HECKTOR data
-  root: /mnt/d/LowngWorkspace/hecktor_raw
+  root: /data/lowngworkspace/hecktor_raw
 
   # Directory for processed (resampled, cropped, normalized) data
   processed_dir: data/processed

@@ -26,11 +26,12 @@ import yaml
 from torch.optim import Adam, AdamW, SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 # Project imports
 from src.models import build_model
 from src.models.losses import CombinedLoss
-from src.train.engine import Trainer
+from src.train.engine import Trainer, setup_ddp, cleanup_ddp, is_ddp_active, is_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,7 @@ def _print_resolved_config(config: Dict[str, Any]) -> None:
 def _build_dataloaders(
     cfg: Dict[str, Any],
     training_cfg: Dict[str, Any] | None = None,
+    use_distributed: bool = False,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train and validation DataLoaders using real HECKTOR data.
 
@@ -241,6 +243,7 @@ def _build_dataloaders(
         training_cfg: Training config dict. If provided, ``batch_size``
             is read from here as source-of-truth, with fallback to
             ``cfg["batch_size"]``.
+        use_distributed: If True, use DistributedSampler for training.
 
     Returns:
         Tuple of ``(train_loader, val_loader)``.
@@ -366,10 +369,22 @@ def _build_dataloaders(
                 collated[key] = [x[key] for x in flat_batch]
         return collated
 
+    # Build samplers
+    train_dataset = _MappedDataset(train_ds)
+    val_dataset = _MappedDataset(val_ds)
+
+    if use_distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        shuffle = False  # sampler handles shuffling
+    else:
+        train_sampler = None
+        shuffle = True
+
     train_loader = DataLoader(
-        _MappedDataset(train_ds),
+        train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
@@ -377,7 +392,7 @@ def _build_dataloaders(
     )
 
     val_loader = DataLoader(
-        _MappedDataset(val_ds),
+        val_dataset,
         batch_size=1,  # Set to 1 to support variable spatial sizes in validation
         shuffle=False,
         num_workers=num_workers,
@@ -427,7 +442,22 @@ def main(args: argparse.Namespace | None = None) -> None:
         parser.add_argument(
             "--resume", type=str, default=None, help="Checkpoint path to resume from."
         )
+        parser.add_argument(
+            "--local_rank", type=int, default=-1,
+            help="Local rank for DDP (set automatically by torchrun).",
+        )
         args = parser.parse_args()
+
+    # ---- DDP setup ----
+    # Detect if launched by torchrun (sets LOCAL_RANK env var)
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    use_distributed = local_rank >= 0
+
+    if use_distributed:
+        local_rank = setup_ddp(backend="nccl")
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- Load config ----
     config_path = Path(args.config)
@@ -436,28 +466,35 @@ def main(args: argparse.Namespace | None = None) -> None:
     with open(config_path, "r", encoding="utf-8") as f:
         config: Dict[str, Any] = yaml.safe_load(f)
 
-    # ---- Logging ----
+    # ---- Logging (only rank 0 logs to console) ----
     log_level = config.get("logging", {}).get("level", "INFO")
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    if is_main_process():
+        logging.basicConfig(
+            level=getattr(logging, log_level.upper(), logging.INFO),
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING)
     logger.info("Config loaded from: %s", config_path)
 
     # ---- Validate config schema (fail fast) ----
     _validate_config(config)
 
     # ---- Print resolved config ----
-    _print_resolved_config(config)
+    if is_main_process():
+        _print_resolved_config(config)
 
     # ---- Seed ----
     seed = int(config.get("seed", 42))
     _seed_everything(seed)
 
-    # ---- Device ----
-    device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Device: %s  |  CUDA available: %s", device, torch.cuda.is_available())
+    # ---- Log device info ----
+    if is_main_process():
+        logger.info(
+            "Device: %s  |  CUDA available: %s  |  DDP: %s",
+            device, torch.cuda.is_available(), use_distributed,
+        )
 
     # ---- Ensure model config specifies baseline_unet ----
     config.setdefault("model", {})
@@ -465,11 +502,13 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     # ---- Build components ----
     model = build_model(config)
-    logger.info("Model: %s", type(model).__name__)
+    if is_main_process():
+        logger.info("Model: %s", type(model).__name__)
 
     train_loader, val_loader = _build_dataloaders(
         config.get("data", {}),
         training_cfg=config.get("training", {}),
+        use_distributed=use_distributed,
     )
 
     optimizer = _build_optimizer(model, config.get("optimizer", {}))
@@ -489,6 +528,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         val_loader=val_loader,
         config=config,
         device=device,
+        local_rank=local_rank,
     )
 
     # ---- Resume ----
@@ -496,23 +536,29 @@ def main(args: argparse.Namespace | None = None) -> None:
         trainer.resume_from_checkpoint(args.resume)
 
     # ---- Train ----
-    results = trainer.fit()
+    try:
+        results = trainer.fit()
 
-    # ---- Save final metrics ----
-    metrics_dir = config.get("paths", {}).get("metrics_dir", "results")
-    metrics_path = Path(metrics_dir) / "baseline_metrics.json"
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "best_val_loss": results["best_val_loss"],
-                "total_epochs": results["total_epochs"],
-            },
-            f,
-            indent=2,
-        )
-    logger.info("Final metrics saved to: %s", metrics_path)
-    logger.info("Training complete.  Best val loss: %.6f", results["best_val_loss"])
+        # ---- Save final metrics (rank 0 only) ----
+        if is_main_process():
+            metrics_dir = config.get("paths", {}).get("metrics_dir", "results")
+            metrics_path = Path(metrics_dir) / "baseline_metrics.json"
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "best_val_loss": results["best_val_loss"],
+                        "total_epochs": results["total_epochs"],
+                    },
+                    f,
+                    indent=2,
+                )
+            logger.info("Final metrics saved to: %s", metrics_path)
+            logger.info("Training complete.  Best val loss: %.6f", results["best_val_loss"])
+    finally:
+        # ---- DDP cleanup ----
+        if use_distributed:
+            cleanup_ddp()
 
 
 if __name__ == "__main__":

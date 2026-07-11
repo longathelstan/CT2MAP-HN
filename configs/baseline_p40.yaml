@@ -1,0 +1,81 @@
+# ============================================================================
+# CT2MAP-HN: Baseline Model Configuration (Teacher)
+# Optimized for 2× NVIDIA Tesla P40 (24GB VRAM each)
+# Hyperparameters preserved from original baseline_nnunet.yaml
+# Schema matches code expectations (train_baseline.py + engine.py)
+# ============================================================================
+
+seed: 42
+
+# --- Preprocessing (must match training data pipeline) ---
+preprocessing:
+  target_spacing: [1.0, 1.0, 1.0]
+  hu_min: -200
+  hu_max: 300
+
+# --- Model Architecture ---
+model:
+  name: baseline_unet
+  in_channels: 1
+  out_channels: 1
+  features: [32, 64, 128, 256, 512, 32]
+  final_activation: sigmoid
+  dropout: 0.1
+  norm: instance
+
+# --- Optimizer (top-level section) ---
+optimizer:
+  name: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+
+# --- Scheduler (top-level section) ---
+scheduler:
+  name: cosine
+  eta_min: 1.0e-6
+
+# --- Loss (top-level section) ---
+loss:
+  w_heatmap: 1.0
+  w_lesion: 1.0
+  w_triage: 0.0
+  heatmap:
+    base: l1
+    use_focal: true
+    focal_gamma: 2.0
+    lesion_weight: 10.0
+  lesion:
+    bce_weight: 1.0
+    dice_weight: 1.0
+    use_focal: true
+
+# --- Training ---
+training:
+  num_epochs: 300
+  batch_size: 2          # Per GPU — effective batch = 2 × 2 GPUs = 4
+  use_amp: true
+  clip_grad_norm: 1.0
+  grad_accumulation_steps: 1
+  val_interval: 1
+  save_interval: 50
+  early_stop_patience: 30
+
+# --- Data Loading ---
+data:
+  config: configs/data.yaml
+  num_workers: 8
+  pin_memory: true
+  augmentation:
+    random_flip_prob: 0.5
+    patch_size: [128, 128, 128]
+  val_patch_size: [128, 128, 128]
+
+# --- Paths ---
+paths:
+  checkpoint_dir: checkpoints/baseline_p40
+  tensorboard_dir: runs/baseline_p40
+  metrics_dir: results
+
+# --- Logging ---
+logging:
+  level: INFO

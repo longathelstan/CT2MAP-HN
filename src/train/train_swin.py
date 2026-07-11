@@ -27,10 +27,11 @@ import yaml
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from src.models import build_model
 from src.models.losses import CombinedLoss
-from src.train.engine import Trainer
+from src.train.engine import Trainer, setup_ddp, cleanup_ddp, is_ddp_active, is_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,13 @@ def _build_loss(cfg: Dict[str, Any]) -> CombinedLoss:
 
 def _build_dataloaders(
     cfg: Dict[str, Any],
+    use_distributed: bool = False,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train and validation DataLoaders using real HECKTOR data.
 
     Args:
         cfg: Data config dict from swin_unetr.yaml (typically config.get("data", {})).
+        use_distributed: If True, use DistributedSampler for training.
 
     Returns:
         Tuple of ``(train_loader, val_loader)``.
@@ -235,10 +238,22 @@ def _build_dataloaders(
                 collated[key] = [x[key] for x in flat_batch]
         return collated
 
+    # Build samplers
+    train_dataset = _MappedDataset(train_ds)
+    val_dataset = _MappedDataset(val_ds)
+
+    if use_distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        shuffle = False  # sampler handles shuffling
+    else:
+        train_sampler = None
+        shuffle = True
+
     train_loader = DataLoader(
-        _MappedDataset(train_ds),
+        train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
@@ -246,7 +261,7 @@ def _build_dataloaders(
     )
 
     val_loader = DataLoader(
-        _MappedDataset(val_ds),
+        val_dataset,
         batch_size=1,  # Set to 1 to support variable spatial sizes in validation
         shuffle=False,
         num_workers=num_workers,
@@ -275,7 +290,21 @@ def main(args: argparse.Namespace | None = None) -> None:
         parser.add_argument(
             "--resume", type=str, default=None, help="Checkpoint to resume from."
         )
+        parser.add_argument(
+            "--local_rank", type=int, default=-1,
+            help="Local rank for DDP (set automatically by torchrun).",
+        )
         args = parser.parse_args()
+
+    # ---- DDP setup ----
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    use_distributed = local_rank >= 0
+
+    if use_distributed:
+        local_rank = setup_ddp(backend="nccl")
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- Load config ----
     config_path = Path(args.config)
@@ -284,20 +313,20 @@ def main(args: argparse.Namespace | None = None) -> None:
     with open(config_path, "r", encoding="utf-8") as f:
         config: Dict[str, Any] = yaml.safe_load(f)
 
-    # ---- Logging ----
+    # ---- Logging (only rank 0) ----
     log_level = config.get("logging", {}).get("level", "INFO")
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    if is_main_process():
+        logging.basicConfig(
+            level=getattr(logging, log_level.upper(), logging.INFO),
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING)
 
     # ---- Seed ----
     seed = int(config.get("seed", 42))
     _seed_everything(seed)
-
-    # ---- Device ----
-    device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- Force model name ----
     config.setdefault("model", {})
@@ -307,9 +336,13 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     # ---- Build ----
     model = build_model(config)
-    logger.info("Model: %s", type(model).__name__)
+    if is_main_process():
+        logger.info("Model: %s  |  Device: %s  |  DDP: %s", type(model).__name__, device, use_distributed)
 
-    train_loader, val_loader = _build_dataloaders(config.get("data", {}))
+    train_loader, val_loader = _build_dataloaders(
+        config.get("data", {}),
+        use_distributed=use_distributed,
+    )
     optimizer = _build_optimizer(model, config.get("optimizer", {}))
     num_epochs = int(config.get("training", {}).get("num_epochs", 200))
     scheduler = _build_scheduler(optimizer, config.get("scheduler", {}), num_epochs)
@@ -324,29 +357,35 @@ def main(args: argparse.Namespace | None = None) -> None:
         val_loader=val_loader,
         config=config,
         device=device,
+        local_rank=local_rank,
     )
 
     if args.resume:
         trainer.resume_from_checkpoint(args.resume)
 
-    results = trainer.fit()
+    try:
+        results = trainer.fit()
 
-    # ---- Save metrics ----
-    metrics_path = Path(
-        config.get("paths", {}).get("metrics_dir", "results")
-    ) / "swin_metrics.json"
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "best_val_loss": results["best_val_loss"],
-                "total_epochs": results["total_epochs"],
-            },
-            f,
-            indent=2,
-        )
-    logger.info("Final metrics saved to: %s", metrics_path)
-    logger.info("Training complete.  Best val loss: %.6f", results["best_val_loss"])
+        # ---- Save metrics (rank 0 only) ----
+        if is_main_process():
+            metrics_path = Path(
+                config.get("paths", {}).get("metrics_dir", "results")
+            ) / "swin_metrics.json"
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "best_val_loss": results["best_val_loss"],
+                        "total_epochs": results["total_epochs"],
+                    },
+                    f,
+                    indent=2,
+                )
+            logger.info("Final metrics saved to: %s", metrics_path)
+            logger.info("Training complete.  Best val loss: %.6f", results["best_val_loss"])
+    finally:
+        if use_distributed:
+            cleanup_ddp()
 
 
 if __name__ == "__main__":
