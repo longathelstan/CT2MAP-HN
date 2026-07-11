@@ -3,13 +3,13 @@
   "cases": [
     {
       "case_id": "MDA-174",
-      "lesion_dice": 0.9157482385635376,
+      "lesion_dice": 0.9084809422492981,
       "heatmap_flags": [],
       "passed": true
     },
     {
       "case_id": "CHUM-056",
-      "lesion_dice": 0.9310653805732727,
+      "lesion_dice": 0.9340810179710388,
       "heatmap_flags": [],
       "passed": true
     }
