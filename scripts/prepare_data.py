@@ -381,9 +381,14 @@ def _build_preprocess_config(prep_cfg: dict[str, Any]) -> dict[str, Any]:
         "hu_max": hu_clip[1],
         "normalize_method": prep_cfg.get("normalize_method", "minmax"),
         "crop": {
-            "method": prep_cfg.get("crop_method", "bbox"),
+            # 'body' = CT-only ROI (H1 fix, reproducible at inference).
+            # 'bbox'/'fixed_size' require the GT lesion mask and are NOT
+            # reproducible at inference — kept only for legacy comparison.
+            "method": prep_cfg.get("crop_method", "body"),
             "margin": crop_margin,
             "fixed_size": crop_size,
+            "hu_threshold": prep_cfg.get("crop_hu_threshold", -500.0),
+            "z_extent_mm": prep_cfg.get("crop_z_extent_mm", 360.0),
         },
     }
 

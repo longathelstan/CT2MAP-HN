@@ -360,6 +360,37 @@ class CaseInferencer:
             ct_image = self._resample_sitk(ct_image, target_spacing)
             ct_array = sitk.GetArrayFromImage(ct_image).astype(np.float32)
 
+        # Crop to CT-only body ROI (H1 fix) — MUST match training preprocessing.
+        # Performed on RAW HU (before clip/normalise), using the same body-mask
+        # logic as scripts/prepare_data.py. The crop slices are recorded in the
+        # metadata so the predicted heatmap can be pasted back to full CT
+        # geometry (Task 12). Controlled by preprocessing.crop.method:
+        #   'body'  -> CT-only body-mask bbox (reproducible, recommended)
+        #   'none'/absent -> no crop (full volume; legacy behaviour)
+        crop_cfg = preproc_cfg.get("crop", {})
+        crop_method = crop_cfg.get("method", "body")
+        crop_info = {
+            "slices": [(0, s) for s in ct_array.shape],
+            "original_shape": ct_array.shape,
+            "method": "identity",
+        }
+        if crop_method == "body":
+            from src.dataio.preprocess import crop_head_neck_roi
+
+            margin = tuple(crop_cfg.get("margin", [10, 10, 10]))
+            hu_threshold = float(crop_cfg.get("hu_threshold", -500.0))
+            z_extent_mm = float(crop_cfg.get("z_extent_mm", 360.0))
+            ct_array, crop_info = crop_head_neck_roi(
+                ct_array,
+                mask=None,
+                margin=margin,
+                method="body",
+                hu_threshold=hu_threshold,
+                z_extent_mm=z_extent_mm,
+                z_spacing_mm=float(target_spacing[2]),
+            )
+        metadata["crop_info"] = crop_info
+
         # Clip HU
         hu_min = preproc_cfg.get("hu_min", -1024)
         hu_max = preproc_cfg.get("hu_max", 1024)

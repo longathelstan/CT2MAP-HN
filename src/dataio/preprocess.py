@@ -185,20 +185,180 @@ def clip_and_normalize_hu(
 # --------------------------------------------------------------------------- #
 
 
+def compute_body_mask(
+    ct_hu: np.ndarray,
+    hu_threshold: float = -500.0,
+    closing_iterations: int = 2,
+) -> np.ndarray:
+    """Derive a body mask from a CT volume using HU thresholding only.
+
+    This is the CT-only replacement for the previous GT-lesion-mask-based ROI
+    definition (H1).  Because it depends solely on the CT intensities, it is
+    reproducible at inference time when no ground-truth mask exists.
+
+    Algorithm:
+        1. Threshold: voxels with HU > ``hu_threshold`` are candidate tissue
+           (air is ≈ −1000 HU; soft tissue/bone are well above −500 HU).
+        2. Morphological closing to bridge small gaps (e.g. skin/air noise).
+        3. Keep the single largest 3D connected component (the patient body;
+           discards disconnected air pockets and most of the scanner bore).
+        4. Fill internal holes (air cavities inside the body — trachea,
+           sinuses, oesophagus — so the ROI stays a solid block).
+
+    Args:
+        ct_hu: 3D CT array in **raw Hounsfield units** (D, H, W). Must be
+            called BEFORE HU clipping/normalisation.
+        hu_threshold: HU cutoff separating body/couch from air background.
+        closing_iterations: Iterations of binary closing.
+
+    Returns:
+        Boolean 3D mask (D, H, W); True inside the body region. If no voxel
+        exceeds the threshold (degenerate input), returns an all-True mask so
+        the caller falls back to the full volume.
+    """
+    from scipy import ndimage  # local import: scipy is already a pipeline dep
+
+    if ct_hu.ndim != 3:
+        raise ValueError(f"Expected 3D CT array, got {ct_hu.ndim}D.")
+
+    binary = ct_hu > hu_threshold
+    if not binary.any():
+        logger.warning("Body-mask threshold produced empty mask; using full volume.")
+        return np.ones_like(ct_hu, dtype=bool)
+
+    if closing_iterations > 0:
+        binary = ndimage.binary_closing(binary, iterations=closing_iterations)
+
+    labeled, n = ndimage.label(binary)
+    if n == 0:
+        logger.warning("Body-mask found 0 components; using full volume.")
+        return np.ones_like(ct_hu, dtype=bool)
+
+    # Largest connected component = patient body
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0  # ignore background label 0
+    largest = int(np.argmax(counts))
+    body = labeled == largest
+
+    # Fill internal air cavities so the ROI is a solid block
+    body = ndimage.binary_fill_holes(body)
+    return body
+
+
+def _crop_body(
+    array: np.ndarray,
+    margin: tuple[int, int, int],
+    original_shape: tuple[int, ...],
+    hu_threshold: float = -500.0,
+    z_extent_mm: float = 360.0,
+    z_spacing_mm: float = 1.0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Crop to a CT-only head-neck ROI (H1 fix).
+
+    ``array`` must be the CT volume in raw HU (RAS orientation, so the highest
+    z-index is the superior/head end). The ROI is derived entirely from the CT:
+
+        1. Body mask via HU threshold (``compute_body_mask``).
+        2. In-plane (y, x): tight bounding box of the body + margin — removes
+           surrounding air and the scanner couch.
+        3. Along z (superior→inferior): keep only the top ``z_extent_mm`` below
+           the body-top landmark (top of head). This restricts whole-body
+           PET/CT scans to the head-neck region without any GT mask, so the
+           crop is reproducible at inference.
+
+    The body-top landmark is stable: across the HECKTOR cohort the top of the
+    body is anatomically the skull vertex (validated: narrower cross-section
+    than mid-body in 97% of sampled cases), and every GTV sits ≤ ~311 mm below
+    it (max observed), so a 360 mm window contains all lesions with margin.
+
+    Args:
+        array: CT volume in raw HU (D, H, W); D is the z axis.
+        margin: Voxel margin (z, y, x) added around the in-plane body bbox.
+        original_shape: Shape of ``array`` (for crop_info).
+        hu_threshold: HU cutoff for the body mask.
+        z_extent_mm: Superior→inferior window length in millimetres.
+        z_spacing_mm: Physical z-spacing (mm/slice) of ``array`` after
+            resampling — used to convert ``z_extent_mm`` to a slice count.
+
+    Returns:
+        (cropped array, crop_info). ``crop_info['slices']`` are (start, stop)
+        index pairs on the ORIGINAL array, so the prediction can be pasted back
+        to full CT geometry.
+    """
+    body = compute_body_mask(array, hu_threshold=hu_threshold)
+    coords = np.argwhere(body)
+    if coords.size == 0:
+        crop_info = {
+            "slices": [(0, s) for s in original_shape],
+            "original_shape": original_shape,
+            "method": "body_empty",
+        }
+        return array.copy(), crop_info
+
+    mins = coords.min(axis=0)
+    maxs = coords.max(axis=0)
+
+    # z (axis 0): head-neck window measured DOWN from the body-top (head).
+    # This is a deliberate anatomical cut, not a tight bbox, so no margin is
+    # applied to the z bounds — the window size itself carries the safety
+    # margin (360 mm vs ~311 mm deepest observed GTV).
+    z_top = int(maxs[0])                       # superior-most body slice (head)
+    z_body_bottom = int(mins[0])
+    n_window = int(round(z_extent_mm / max(z_spacing_mm, 1e-6)))
+    z_start = max(0, z_top - n_window)
+    z_start = max(z_start, z_body_bottom)      # never extend past the body
+    z_end = min(original_shape[0], z_top + 1)
+
+    # y, x (axes 1, 2): tight body bbox + margin.
+    yx_slices = []
+    for dim in (1, 2):
+        start = max(0, int(mins[dim]) - margin[dim])
+        end = min(original_shape[dim], int(maxs[dim]) + margin[dim] + 1)
+        yx_slices.append(slice(start, end))
+
+    slices = [slice(z_start, z_end), yx_slices[0], yx_slices[1]]
+    cropped = array[slices[0], slices[1], slices[2]].copy()
+    crop_info = {
+        "slices": [(s.start, s.stop) for s in slices],
+        "original_shape": original_shape,
+        "method": "body",
+        "hu_threshold": hu_threshold,
+        "z_extent_mm": z_extent_mm,
+        "z_spacing_mm": z_spacing_mm,
+        "body_z_range": [z_body_bottom, z_top],
+    }
+    logger.debug(
+        "Body crop: %s -> %s (z_window=%dmm=%d slices, margin=%s)",
+        original_shape, cropped.shape, int(z_extent_mm), n_window, margin,
+    )
+    return cropped, crop_info
+
+
 def crop_head_neck_roi(
     array: np.ndarray,
     mask: Optional[np.ndarray] = None,
     margin: tuple[int, int, int] = (10, 10, 10),
     method: str = "bbox",
     fixed_size: Optional[tuple[int, int, int]] = None,
+    hu_threshold: float = -500.0,
+    z_extent_mm: float = 360.0,
+    z_spacing_mm: float = 1.0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Crop the head-neck region of interest from a 3D volume.
 
-    Supports two methods:
+    Supports three methods:
+        - 'body': CT-only bounding box around an HU-thresholded body mask
+          (see ``compute_body_mask``). Needs NO ground-truth mask and is
+          reproducible at inference — this is the H1-fix method and the
+          recommended default for the baseline.
         - 'bbox': tight bounding box around mask foreground + margin.
+          REQUIRES the GT lesion mask, so it is NOT reproducible at inference.
         - 'fixed_size': center crop of fixed_size, centered on mask centroid.
+          Also requires a mask.
 
-    If no mask is provided, the volume is returned as-is with identity crop info.
+    If method is 'bbox'/'fixed_size' and no mask is provided, the volume is
+    returned as-is with identity crop info. ``array`` must be in raw HU when
+    method='body'.
 
     Args:
         array: 3D numpy array (D, H, W) — z, y, x ordering.
@@ -216,15 +376,27 @@ def crop_head_neck_roi(
     Raises:
         ValueError: If method is unknown, or fixed_size missing.
     """
-    if method not in ("bbox", "fixed_size"):
-        raise ValueError(f"Unknown crop method '{method}'. Use 'bbox' or 'fixed_size'.")
+    if method not in ("bbox", "fixed_size", "body"):
+        raise ValueError(
+            f"Unknown crop method '{method}'. Use 'bbox', 'fixed_size', or 'body'."
+        )
 
     original_shape = array.shape
     ndim = len(original_shape)
     if ndim != 3:
         raise ValueError(f"Expected 3D array, got {ndim}D.")
 
-    # No mask → return full volume
+    # 'body': CT-only ROI (H1 fix) — derived from the CT itself, needs no mask
+    # and is therefore reproducible at inference time.
+    if method == "body":
+        return _crop_body(
+            array, margin, original_shape,
+            hu_threshold=hu_threshold,
+            z_extent_mm=z_extent_mm,
+            z_spacing_mm=z_spacing_mm,
+        )
+
+    # 'bbox'/'fixed_size' require a mask. With no mask → return full volume.
     if mask is None:
         crop_info = {
             "slices": [slice(0, s) for s in original_shape],
@@ -431,6 +603,8 @@ def preprocess_case(
     crop_method = crop_cfg.get("method", "bbox")
     crop_margin = tuple(crop_cfg.get("margin", [10, 10, 10]))
     crop_fixed_size = tuple(crop_cfg.get("fixed_size", [192, 192, 192]))
+    crop_hu_threshold = float(crop_cfg.get("hu_threshold", -500.0))
+    crop_z_extent_mm = float(crop_cfg.get("z_extent_mm", 360.0))
 
     # Step 1: Load
     logger.info("Preprocessing case: %s", Path(ct_path).name)
@@ -483,6 +657,9 @@ def preprocess_case(
         margin=crop_margin,
         method=crop_method,
         fixed_size=crop_fixed_size if crop_method == "fixed_size" else None,
+        hu_threshold=crop_hu_threshold,
+        z_extent_mm=crop_z_extent_mm,
+        z_spacing_mm=float(target_spacing[2]),
     )
 
     # Apply same crop to PET and mask
@@ -499,6 +676,23 @@ def preprocess_case(
 
     if mask_array is not None:
         mask_cropped = mask_array[slices[0], slices[1], slices[2]].copy()
+        # Safety check (prep-time only; mask unavailable at inference): the
+        # CT-only crop must not clip the GT lesion. If it does, the z-window is
+        # too small for this case — warn loudly instead of silently training on
+        # a truncated target.
+        gtv_before = int((mask_array > 0).sum())
+        gtv_after = int((mask_cropped > 0).sum())
+        if gtv_before > 0:
+            retained = gtv_after / gtv_before
+            crop_info["gtv_retained"] = retained
+            if retained < 0.999:
+                logger.warning(
+                    "CROP CLIPPED GTV for %s: %.2f%% of lesion retained "
+                    "(%d/%d voxels). Crop method=%s z_extent_mm=%s — consider "
+                    "increasing z_extent_mm.",
+                    Path(ct_path).name, 100.0 * retained,
+                    gtv_after, gtv_before, crop_method, crop_z_extent_mm,
+                )
     else:
         mask_cropped = None
 

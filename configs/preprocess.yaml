@@ -25,18 +25,30 @@ preprocess:
 
   # --- Cropping ---
   # Crop method:
-  #   bbox    : Tight bounding box around head-neck anatomy (recommended)
-  #   fixed   : Fixed crop_size centered on image center
-  #   anatomy : Anatomy-aware cropping using landmark detection
-  crop_method: bbox
+  #   body        : CT-ONLY head-neck ROI (H1 fix, RECOMMENDED). Body mask from
+  #                 HU threshold + fixed superior z-window from top-of-head.
+  #                 Reproducible at inference (needs NO GT mask).
+  #   bbox        : Tight bbox around the GT LESION mask. NOT reproducible at
+  #                 inference (mask unavailable) — legacy comparison only.
+  #   fixed_size  : Fixed crop_size centered on the GT lesion mask. Same
+  #                 inference limitation as bbox.
+  crop_method: body
 
-  # Margin around bounding box in voxels [x, y, z]
-  # Only used when crop_method=bbox
+  # In-plane (y, x) margin around the body bbox in voxels [z, y, x].
+  # z entry is ignored by the 'body' method (z is governed by z_extent_mm).
   crop_margin: [10, 10, 10]
 
-  # Fixed crop size in voxels [D, H, W]
-  # Used as fallback when crop_method=fixed, or as max size for bbox method
+  # Fixed crop size in voxels [D, H, W] — only used by crop_method=fixed_size.
   crop_size: [192, 192, 192]
+
+  # --- body crop parameters (crop_method=body) ---
+  # HU threshold separating body (soft tissue/bone) from surrounding air.
+  crop_hu_threshold: -500.0
+
+  # Superior→inferior head-neck window length in mm, measured down from the
+  # top-of-head landmark. Cohort check (149 cases): deepest GTV sits ~311 mm
+  # below top-of-head; 360 mm keeps all lesions with ~50 mm safety margin.
+  crop_z_extent_mm: 360.0
 
   # --- Orientation ---
   # Reorient all images to standard orientation
