@@ -35,6 +35,27 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
+class _HeatmapOutputWrapper(nn.Module):
+    """Expose the heatmap tensor from a multi-head model's dict output.
+
+    ``BaselineUNet.forward`` returns ``{"heatmap", "lesion", "triage", ...}``,
+    but MONAI's ``SlidingWindowInferer`` expects the wrapped module to return a
+    single tensor.  This adapter selects one key so the trained model can be
+    driven by the inferer unchanged.
+    """
+
+    def __init__(self, model: nn.Module, key: str = "heatmap") -> None:
+        super().__init__()
+        self.model = model
+        self.key = key
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.model(x)
+        if isinstance(out, dict):
+            return out[self.key]
+        return out
+
+
 class CaseInferencer:
     """End-to-end single-case inference engine.
 
@@ -86,6 +107,17 @@ class CaseInferencer:
         # Load model
         self.checkpoint_path = checkpoint_path
         self.model = self._load_model()
+
+        # Whether the model's forward output is already a probability in [0, 1]
+        # (i.e. a final Sigmoid lives inside the model).  BaselineUNet's heads
+        # apply Sigmoid, so post-processing must NOT apply it again.  Set after
+        # _load_model, which may replace self.config["model"] from the ckpt.
+        model_name = str(
+            self.config.get("model", {}).get(
+                "name", self.config.get("model", {}).get("type", "baseline_unet")
+            )
+        ).lower().replace("_", "")
+        self.model_outputs_probabilities = model_name == "baselineunet"
         logger.info(
             "CaseInferencer initialised (device=%s, ckpt=%s)",
             self.device,
@@ -102,20 +134,64 @@ class CaseInferencer:
         Returns:
             Model in eval mode on ``self.device``.
         """
-        model = self._build_model()
         checkpoint = torch.load(
             self.checkpoint_path,
             map_location=self.device,
             weights_only=False,
         )
 
+        # Prefer the config embedded in the checkpoint so that the model
+        # architecture and preprocessing always match the trained weights.
+        # This prevents architecture drift between the training and inference
+        # code paths (the original cause of the uniform-heatmap failure).
+        ckpt_config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+        if isinstance(ckpt_config, dict):
+            if "model" in ckpt_config:
+                self.config["model"] = ckpt_config["model"]
+            if "preprocessing" in ckpt_config:
+                # Only fill in preprocessing keys the caller did not override.
+                merged = dict(ckpt_config["preprocessing"])
+                merged.update(self.config.get("preprocessing", {}) or {})
+                self.config["preprocessing"] = merged
+            logger.info(
+                "Using model/preprocessing config embedded in checkpoint "
+                "(model=%s, preprocessing=%s)",
+                self.config.get("model", {}).get("name"),
+                self.config.get("preprocessing"),
+            )
+
+        model = self._build_model()
+
         # Support both raw state_dict and wrapped checkpoint
-        if "model_state_dict" in checkpoint:
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             state_dict = checkpoint["model_state_dict"]
         else:
             state_dict = checkpoint
 
-        model.load_state_dict(state_dict, strict=False)
+        # Load strictly.  The only weights we tolerate being absent are the
+        # optional uncertainty head (not present in the baseline checkpoint).
+        result = model.load_state_dict(state_dict, strict=False)
+        unexpected = list(result.unexpected_keys)
+        missing = [
+            k for k in result.missing_keys if not k.startswith("uncertainty_head")
+        ]
+        if unexpected or missing:
+            raise RuntimeError(
+                "Checkpoint does not match the reconstructed architecture — "
+                f"{len(missing)} missing and {len(unexpected)} unexpected keys. "
+                "This indicates the inference model differs from the trained "
+                "model.  First missing: "
+                f"{missing[:3]}; first unexpected: {unexpected[:3]}"
+            )
+        n_loaded = len(state_dict) - len(unexpected)
+        logger.info(
+            "Loaded %d/%d checkpoint tensors into the model", n_loaded, len(state_dict)
+        )
+
+        # BaselineUNet returns a dict; wrap so the sliding-window inferer sees
+        # a single heatmap tensor.
+        model = _HeatmapOutputWrapper(model, key="heatmap")
+
         model = model.to(self.device)
         model.eval()
         logger.info("Model loaded from %s", self.checkpoint_path)
@@ -136,13 +212,39 @@ class CaseInferencer:
             ValueError: If model type is unsupported.
         """
         model_cfg = self.config.get("model", {})
-        model_type = model_cfg.get("type", "basic_unet").lower()
+        # Accept both "name" (training config key) and "type" (legacy inference
+        # key).  Default to baseline_unet — the Model 0 architecture actually
+        # trained — rather than a bare BasicUNet.
+        model_type = str(
+            model_cfg.get("name", model_cfg.get("type", "baseline_unet"))
+        ).lower()
         # Normalise aliases: "basicunet" → "basic_unet", "swinunetr" → "swin_unetr"
         model_type_normalised = model_type.replace("_", "")
 
         in_channels = model_cfg.get("in_channels", 1)
         out_channels = model_cfg.get("out_channels", 1)
         spatial_dims = model_cfg.get("spatial_dims", 3)
+
+        if model_type_normalised == "baselineunet":
+            from src.models.baseline_unet import BaselineUNet
+
+            features = model_cfg.get("features", (32, 32, 64, 128, 256, 32))
+            if isinstance(features, list):
+                features = tuple(features)
+            dropout = model_cfg.get("dropout", 0.0)
+            norm = model_cfg.get("norm", "instance")
+
+            model = BaselineUNet(
+                in_channels=in_channels,
+                features=features,
+                dropout=dropout,
+                use_uncertainty=model_cfg.get("use_uncertainty", False),
+                norm=norm,
+            )
+            logger.info(
+                "Built baseline_unet model (features=%s, norm=%s)", features, norm
+            )
+            return model
 
         if model_type_normalised == "swinunetr":
             from monai.networks.nets import SwinUNETR  # type: ignore[import-untyped]
@@ -335,8 +437,15 @@ class CaseInferencer:
             3-D numpy heatmap in [0, 1].
         """
         with torch.no_grad():
-            # Sigmoid to [0, 1]
-            heatmap = torch.sigmoid(output).squeeze(0).squeeze(0)
+            # The BaselineUNet HeatmapHead already applies a final Sigmoid, so
+            # its output is a probability in [0, 1].  Applying sigmoid a second
+            # time floors the map into [0.5, 0.73] and destroys contrast — this
+            # was the cause of the "everything ≈ 0.5" heatmap.  Only apply the
+            # activation when the model emits raw logits.
+            if self.model_outputs_probabilities:
+                heatmap = output.squeeze(0).squeeze(0)
+            else:
+                heatmap = torch.sigmoid(output).squeeze(0).squeeze(0)
             heatmap = heatmap.cpu().numpy().astype(np.float32)
 
         heatmap = np.clip(heatmap, 0.0, 1.0)

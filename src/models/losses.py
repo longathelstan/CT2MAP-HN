@@ -44,6 +44,7 @@ def _focal_weight(
         Weight tensor with the same shape as *pred*.
     """
     p_t = pred * target + (1.0 - pred) * (1.0 - target)
+    p_t = p_t.clamp(0.0, 1.0)  # Prevent negative bases for .pow() due to FP16 noise
     return (1.0 - p_t).pow(gamma)
 
 
@@ -124,17 +125,20 @@ class HeatmapLoss(nn.Module):
         Returns:
             Scalar loss value.
         """
+        pred_safe = torch.nan_to_num(pred.float(), nan=0.0)
+        target_safe = torch.nan_to_num(target.float(), nan=0.0)
+
         if self.base == "mse":
-            loss_map = F.mse_loss(pred, target, reduction="none")
+            loss_map = F.mse_loss(pred_safe, target_safe, reduction="none")
         else:
-            loss_map = F.l1_loss(pred, target, reduction="none")
+            loss_map = F.l1_loss(pred_safe, target_safe, reduction="none")
 
         if self.use_focal and lesion_mask is not None:
             # Upweight lesion voxels
             weight = torch.ones_like(loss_map)
             weight = weight + lesion_mask * (self.lesion_weight - 1.0)
             # Optional focal modulation on prediction error
-            focal_w = _focal_weight(pred, target, self.focal_gamma)
+            focal_w = _focal_weight(pred_safe, target_safe, self.focal_gamma)
             weight = weight * focal_w
             loss_map = loss_map * weight
 
@@ -187,8 +191,8 @@ class LesionLoss(nn.Module):
         # --- BCE / Focal component ---
         # Run BCE in float32 for autocast compatibility and numerical stability
         with torch.amp.autocast("cuda", enabled=False):
-            pred_f32 = pred.float()
-            target_f32 = target.float()
+            pred_f32 = torch.nan_to_num(pred.float(), nan=0.0).clamp(0.0, 1.0)
+            target_f32 = torch.nan_to_num(target.float(), nan=0.0).clamp(0.0, 1.0)
             if self.use_focal:
                 bce = F.binary_cross_entropy(pred_f32, target_f32, reduction="none")
                 focal_w = _focal_weight(pred_f32, target_f32, self.focal_gamma)
@@ -197,8 +201,8 @@ class LesionLoss(nn.Module):
             else:
                 bce_loss = F.binary_cross_entropy(pred_f32, target_f32, reduction="mean")
 
-        # --- Dice component ---
-        dice_loss = 1.0 - _dice_score(pred, target)
+        # --- Dice component (use clamped pred for NaN safety) ---
+        dice_loss = 1.0 - _dice_score(pred_f32, target_f32)
 
         return self.bce_weight * bce_loss.to(pred.dtype) + self.dice_weight * dice_loss
 
@@ -241,7 +245,9 @@ class TriageLoss(nn.Module):
                 logits, target, pos_weight=pw
             )
         with torch.amp.autocast("cuda", enabled=False):
-            return F.binary_cross_entropy(pred.float(), target.float()).to(pred.dtype)
+            pred_f32 = torch.nan_to_num(pred.float(), nan=0.0).clamp(0.0, 1.0)
+            target_f32 = torch.nan_to_num(target.float(), nan=0.0).clamp(0.0, 1.0)
+            return F.binary_cross_entropy(pred_f32, target_f32).to(pred.dtype)
 
 
 # ====================================================================

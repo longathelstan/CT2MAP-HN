@@ -65,13 +65,13 @@ class BaselineUNet(nn.Module):
         self.in_channels = in_channels
         self.use_uncertainty = use_uncertainty
 
-        # Map string norm name to MONAI norm tuple
+        # Map string norm name to MONAI norm tuple (using eps=1e-4 for FP16 stability)
         _norm_map = {
-            "instance": ("instance", {"affine": True}),
-            "batch": ("batch", {"affine": True}),
-            "group": ("group", {"num_groups": 8, "affine": True}),
+            "instance": ("instance", {"affine": True, "eps": 1e-4}),
+            "batch": ("batch", {"affine": True, "eps": 1e-4}),
+            "group": ("group", {"num_groups": 8, "affine": True, "eps": 1e-4}),
         }
-        norm_cfg = _norm_map.get(norm.lower(), ("batch", {"affine": True}))
+        norm_cfg = _norm_map.get(norm.lower(), ("batch", {"affine": True, "eps": 1e-4}))
 
         # ---- Backbone ----
         # BasicUNet outputs `features[-1]` channels.
