@@ -50,6 +50,10 @@ def main():
     config["optimizer"]["lr"] = 5.0e-3
     config["data"].setdefault("augmentation", {})
     config["data"]["augmentation"]["num_samples"] = 1
+    # Overfit smoke test MUST sample lesion-containing patches only.
+    # Default pos_ratio=0.7 leaves a 30% chance of a background-only patch
+    # (empty target -> Dice=0.0), which is a test artifact, not a model failure.
+    config["data"]["augmentation"]["pos_ratio"] = 1.0
     
     config.setdefault("model", {})
     config["model"]["name"] = "baseline_unet"

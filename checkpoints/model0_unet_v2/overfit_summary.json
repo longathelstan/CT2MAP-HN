@@ -1,15 +1,15 @@
 {
-  "passed": true,
+  "passed": false,
   "cases": [
     {
       "case_id": "MDA-174",
-      "lesion_dice": 0.9084809422492981,
+      "lesion_dice": 0.0,
       "heatmap_flags": [],
-      "passed": true
+      "passed": false
     },
     {
       "case_id": "CHUM-056",
-      "lesion_dice": 0.9340810179710388,
+      "lesion_dice": 0.9555920958518982,
       "heatmap_flags": [],
       "passed": true
     }

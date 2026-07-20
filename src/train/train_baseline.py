@@ -287,7 +287,7 @@ def _build_dataloaders(
         "flip_prob": aug_cfg.get("random_flip_prob", 0.5),
         "flip_axes": [0, 1, 2],
         "num_samples": int(aug_cfg.get("num_samples", 2)),  # number of crops per volume
-        "pos_ratio": 0.7,
+        "pos_ratio": float(aug_cfg.get("pos_ratio", 0.7)),  # config-driven; default unchanged
         "affine_prob": 0.3,
         "gaussian_noise_prob": 0.2,
     }
