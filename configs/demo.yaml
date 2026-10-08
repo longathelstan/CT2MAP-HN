@@ -76,3 +76,13 @@ streamlit:
     port: 8501
     address: 0.0.0.0
     max_upload_size_mb: 500
+
+# --- NVIDIA NV-Reason-CT (3D-VLM Reasoning) ---
+nv_reason:
+  enabled: true
+  model_dir: checkpoints/NV-Reason-CT
+  device: cuda:0
+  default_region: chest
+  enable_thinking: false
+  max_new_tokens: 1024
+
